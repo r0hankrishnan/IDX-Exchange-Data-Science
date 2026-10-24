@@ -29,13 +29,15 @@ imputation strategy per column) is in the CONFIG block below.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, TargetEncoder
+
+from .splits import close_month, time_split, validation_months, window_splits  # noqa: F401
 
 # =============================================================================
 # CONFIG
@@ -190,56 +192,6 @@ def clean(df: pd.DataFrame, steps: Iterable[Callable] = CLEANING_STEPS) -> pd.Da
     for step in steps:
         df = df.pipe(step)
     return df
-
-
-# =============================================================================
-# Stage 2: time-based split
-# =============================================================================
-
-
-def close_month(df: pd.DataFrame) -> pd.Series:
-    return df[DATE_COL].dt.to_period("M")
-
-
-def time_split(df: pd.DataFrame, test_month: str | pd.Period, train_months: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Test = `test_month`; train = the `train_months` months immediately before it."""
-    test_month = pd.Period(test_month, freq="M")
-    month = close_month(df)
-    first_train = test_month - train_months
-    if first_train < month.min():
-        raise ValueError(f"Not enough history: {train_months} months before {test_month} starts at {first_train}, "
-                         f"data starts at {month.min()}")
-    train = df[(month >= first_train) & (month < test_month)]
-    test = df[month == test_month]
-    return train.reset_index(drop=True), test.reset_index(drop=True)
-
-
-def validation_months(test_month: str | pd.Period, n_months: int = 1) -> list[pd.Period]:
-    """The `n_months` months right before `test_month`, oldest first.
-
-    Use these (not the test month) to choose the window length X. n_months=1 is the
-    "hold out the month before test" approach; n_months>1 is a rolling backtest.
-    """
-    test_month = pd.Period(test_month, freq="M")
-    return list(pd.period_range(test_month - n_months, test_month - 1, freq="M"))
-
-
-def window_splits(df: pd.DataFrame, eval_months: Iterable[str | pd.Period],
-                  windows: Iterable[int]) -> Iterator[tuple[int, pd.Period, pd.DataFrame, pd.DataFrame]]:
-    """Yield (train_months, eval_month, train, eval) for every window x eval month.
-
-    Fit a fresh Preprocessor on each `train`, so nothing from `eval` leaks in:
-
-        for x, month, train, val in window_splits(df, validation_months("2026-04", 6), [1, 3, 6, 12]):
-            pre = Preprocessor(scale=...)
-            train_p, val_p = pre.fit_transform(train), pre.transform(val)
-            ...  # fit and score a model
-    """
-    for x in windows:
-        for month in eval_months:
-            month = pd.Period(month, freq="M")
-            train, evaluation = time_split(df, month, x)
-            yield x, month, train, evaluation
 
 
 # =============================================================================
