@@ -188,10 +188,15 @@ class DatasetAPreprocessor(TransformerMixin, BaseEstimator):
     encodings are means of log price.
 
     log_features: log1p LivingArea and LotSizeSquareFeet (experiment for linear models).
+    extra_numeric / extra_categorical: columns beyond FEATURES, median-imputed or
+    target-encoded like the Dataset A ones (e.g. the week 6 features in features.py).
     """
 
-    def __init__(self, log_features: bool = False, random_state: int = 0):
+    def __init__(self, log_features: bool = False, extra_numeric: Iterable[str] = (),
+                 extra_categorical: Iterable[str] = (), random_state: int = 0):
         self.log_features = log_features
+        self.extra_numeric = extra_numeric
+        self.extra_categorical = extra_categorical
         self.random_state = random_state
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> DatasetAPreprocessor:
@@ -199,7 +204,7 @@ class DatasetAPreprocessor(TransformerMixin, BaseEstimator):
         return self
 
     def fit_transform(self, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
-        self.medians_ = X[MEDIAN_COLS].median()
+        self.medians_ = X[self._median_cols()].median()
         self.modes_ = X[MODE_COLS + BINARY_COLS].mode().iloc[0]
         self.geo_by_zip_ = X.groupby("PostalCode")[GEO_COLS].median()
         self.geo_by_county_ = X.groupby("CountyOrParish")[GEO_COLS].median()
@@ -216,16 +221,22 @@ class DatasetAPreprocessor(TransformerMixin, BaseEstimator):
     def get_feature_names_out(self, input_features=None) -> np.ndarray:
         return np.array(self.feature_names_out_)
 
-    @staticmethod
-    def _categories(X: pd.DataFrame) -> pd.DataFrame:
-        return X[CATEGORICAL_COLS].astype("object").fillna(UNKNOWN)
+    def _median_cols(self) -> list[str]:
+        return MEDIAN_COLS + list(self.extra_numeric)
+
+    def _categorical_cols(self) -> list[str]:
+        return CATEGORICAL_COLS + list(self.extra_categorical)
+
+    def _categories(self, X: pd.DataFrame) -> pd.DataFrame:
+        return X[self._categorical_cols()].astype("object").fillna(UNKNOWN)
 
     def _finish(self, X: pd.DataFrame, encoded: np.ndarray) -> pd.DataFrame:
-        out = X[MEDIAN_COLS + MODE_COLS + BINARY_COLS + GEO_COLS].copy()
+        median_cols = self._median_cols()
+        out = X[median_cols + MODE_COLS + BINARY_COLS + GEO_COLS].copy()
         for col in BINARY_COLS:
             out[f"{col}_missing"] = out[col].isna().astype(float)
 
-        out[MEDIAN_COLS] = out[MEDIAN_COLS].fillna(self.medians_)
+        out[median_cols] = out[median_cols].fillna(self.medians_)
         out[MODE_COLS + BINARY_COLS] = out[MODE_COLS + BINARY_COLS].fillna(self.modes_)
         for col in GEO_COLS:
             out[col] = (
@@ -237,7 +248,7 @@ class DatasetAPreprocessor(TransformerMixin, BaseEstimator):
         if self.log_features:
             out[LOG_COLS] = np.log1p(out[LOG_COLS])
 
-        for i, col in enumerate(CATEGORICAL_COLS):
+        for i, col in enumerate(self._categorical_cols()):
             out[f"{col}_te"] = encoded[:, i]
         self.feature_names_out_ = list(out.columns)
         return out

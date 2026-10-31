@@ -8,8 +8,8 @@
     best = best_windows(results)                # chosen X per model
     test_results = score_on_test(models, df, "2026-04", best)
 
-Swap the preprocessing by passing `preprocessor=` to build_model, or the split rule
-by passing `split=` to backtest / score_on_test.
+Swap the preprocessing by passing `preprocessor=` to build_model, the split rule
+by passing `split=` to backtest / score_on_test, or the input columns with `features=`.
 """
 
 from __future__ import annotations
@@ -70,14 +70,15 @@ def fit_and_score(model: BaseEstimator, train: pd.DataFrame, test: pd.DataFrame,
 
 
 def backtest(models: dict[str, BaseEstimator], df: pd.DataFrame, eval_months: Iterable[str | pd.Period],
-             windows: Iterable[int], split: Split = dataset_a.split) -> pd.DataFrame:
+             windows: Iterable[int], split: Split = dataset_a.split,
+             features: list[str] = dataset_a.FEATURES) -> pd.DataFrame:
     """Score every model for every training window X on every evaluation month."""
     rows = []
     for x in windows:
         for month in eval_months:
             train, evaluation = split(df, pd.Period(month, freq="M"), x)
             for name, model in models.items():
-                _, _, scores = fit_and_score(model, train, evaluation)
+                _, _, scores = fit_and_score(model, train, evaluation, features)
                 rows.append({"model": name, "X": x, "month": str(month), "n_train": len(train), **scores})
     return pd.DataFrame(rows)
 
@@ -90,7 +91,8 @@ def best_windows(results: pd.DataFrame, metric: str = "r2") -> dict[str, int]:
 
 
 def score_on_test(models: dict[str, BaseEstimator], df: pd.DataFrame, test_month: str | pd.Period,
-                  windows: dict[str, int], split: Split = dataset_a.split):
+                  windows: dict[str, int], split: Split = dataset_a.split,
+                  features: list[str] = dataset_a.FEATURES):
     """Fit each model on its chosen window and score it once on the test month.
 
     Returns a results table (train and test scores) and the fitted models.
@@ -98,7 +100,7 @@ def score_on_test(models: dict[str, BaseEstimator], df: pd.DataFrame, test_month
     rows, fitted = [], {}
     for name, model in models.items():
         train, test = split(df, pd.Period(test_month, freq="M"), windows[name])
-        fitted[name], train_scores, test_scores = fit_and_score(model, train, test)
+        fitted[name], train_scores, test_scores = fit_and_score(model, train, test, features)
         rows.append({
             "model": name, "X": windows[name], "n_train": len(train), "n_test": len(test),
             "train_r2": train_scores["r2"],
