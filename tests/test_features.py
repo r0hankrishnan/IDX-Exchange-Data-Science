@@ -5,6 +5,7 @@ from shapely.geometry import box
 
 from idx_exchange_data_science import dataset_a as da
 from idx_exchange_data_science import features as ft
+from idx_exchange_data_science.splits import split
 
 
 def toy_districts() -> gpd.GeoDataFrame:
@@ -14,17 +15,6 @@ def toy_districts() -> gpd.GeoDataFrame:
         "DistrictTy": ["Unified", "Elementary", "High"],
         "SEDpct": [20.0, 60.0, 50.0],
     }, geometry=[box(-119, 34, -118, 35), box(-118, 34, -117, 35), box(-118, 34, -117, 35)], crs="EPSG:4326")
-
-
-def test_add_ratios():
-    df = pd.DataFrame({"BedroomsTotal": [3.0, np.nan], "BathroomsTotalInteger": [2.0, 2.0],
-                       "LivingArea": [1500.0, 2000.0], "LotSizeSquareFeet": [6000.0, 2000.0]})
-    out = ft.add_ratios(df)
-    assert out["BedBathRatio"].iloc[0] == 1.5
-    assert out["SqftPerBedroom"].iloc[0] == 500
-    assert np.isclose(out["LogLotToLivingArea"].iloc[0], np.log(4))
-    assert out["LogLotToLivingArea"].iloc[1] == 0
-    assert out[["BedBathRatio", "SqftPerBedroom"]].iloc[1].isna().all()
 
 
 def test_school_districts_pick_the_serving_district():
@@ -49,39 +39,91 @@ def test_elementary_district_wins_over_overlapping_unified():
     assert out["HighDistrict"].item() == "East High (A)"
 
 
-def preprocessor() -> da.DatasetAPreprocessor:
-    return da.DatasetAPreprocessor(extra_numeric=ft.RATIO_COLS + ft.DISTRICT_NUMERIC_COLS,
-                                   extra_categorical=ft.DISTRICT_COLS)
-
-
-def with_week6_features(clean_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    df = ft.add_school_districts(ft.add_ratios(clean_df), toy_districts())
-    return df, da.FEATURES + ft.RATIO_COLS + ft.DISTRICT_NUMERIC_COLS + ft.DISTRICT_COLS
+def with_districts(clean_df: pd.DataFrame) -> pd.DataFrame:
+    df = ft.add_school_districts(clean_df, toy_districts())
+    df.loc[df.index[-5:], "DistrictSEDPct"] = np.nan  # in the last (evaluation) month
+    return df
 
 
 def test_extra_columns_are_imputed_and_encoded_from_train(clean_df):
-    clean_df.loc[clean_df.index[-5:], "BedroomsTotal"] = np.nan  # in the last (test) month
-    df, features = with_week6_features(clean_df)
-    train, test = da.split(df, "2024-08", 3)
-    pre = preprocessor()
-    X_train = pre.fit_transform(train[features], train[da.TARGET])
-    X_test = pre.transform(test[features])
+    train, test = split(with_districts(clean_df), "2024-08", 3)
+    pre = da.make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
+    X_train = pre.fit_transform(train, train[da.TARGET])
+    X_test = pre.transform(test)
 
     assert not X_train.isna().any().any() and not X_test.isna().any().any()
-    assert {"BedBathRatio", "DistrictSEDPct", "ElementaryDistrict_te", "HighDistrict_te"} <= set(X_test.columns)
-    missing = test["BedBathRatio"].isna()
+    assert {"DistrictSEDPct", "ElementaryDistrict", "HighDistrict"} <= set(X_test.columns)
+    missing = test["DistrictSEDPct"].isna()
     assert missing.any()
-    assert (X_test.loc[missing, "BedBathRatio"] == train["BedBathRatio"].median()).all()
+    assert (X_test.loc[missing, "DistrictSEDPct"] == train["DistrictSEDPct"].median()).all()
 
 
 def test_extra_columns_keep_test_rows_independent(clean_df):
-    df, features = with_week6_features(clean_df)
-    train, test = da.split(df, "2024-08", 3)
-    pre = preprocessor().fit(train[features], train[da.TARGET])
-    pd.testing.assert_frame_equal(pre.transform(test[features]).head(1), pre.transform(test[features].head(1)))
+    train, test = split(with_districts(clean_df), "2024-08", 3)
+    pre = da.make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
+    pre.fit(train, train[da.TARGET])
+    pd.testing.assert_frame_equal(pre.transform(test).head(1), pre.transform(test.head(1)))
 
 
-def test_no_extra_columns_matches_dataset_a(clean_df):
-    train, test = da.split(clean_df, "2024-08", 3)
-    plain = da.DatasetAPreprocessor().fit(train[da.FEATURES], train[da.TARGET])
-    assert len(plain.get_feature_names_out()) == len(da.FEATURES) + len(da.BINARY_COLS)
+# --- listing date ---------------------------------------------
+
+def sales() -> pd.DataFrame:
+    return pd.DataFrame({
+        "ListingKey": [1, 2, 3, 4],
+        "CloseDate": pd.to_datetime(["2024-05-10", "2024-05-20", "2024-05-25", "2024-05-30"]),
+        "PostalCode": pd.array(["90001", "90001", "90002", None], dtype="string"),
+    })
+
+
+def test_listing_date_drops_implausible_gaps():
+    dates = pd.DataFrame({"ListingKey": [1, 2, 3],
+                          ft.LISTING_DATE: pd.to_datetime(["2024-03-15", "2021-01-01", "2024-06-01"])})
+    out = ft.add_listing_date(sales(), dates)
+    assert out[ft.LISTING_DATE].notna().tolist() == [True, False, False, False]  # too old, after close, unknown
+    assert out["MonthsToClose"].iloc[0] == 2
+    assert out["MonthsToClose"].iloc[1:].isna().all()
+
+
+# --- comparable sales -------------------------------------------------------------
+
+def comp_sales() -> pd.DataFrame:
+    """Five homes on a line of longitude; the last one lists in 2024-06 and closes in 2024-08."""
+    return pd.DataFrame({
+        "Latitude": [34.0] * 5,
+        "Longitude": [-118.00, -118.01, -118.02, -118.50, -118.005],
+        "LivingArea": [1000.0, 1000.0, 1000.0, 1000.0, 2000.0],
+        "ClosePrice": [400_000.0, 500_000.0, 600_000.0, 900_000.0, 1_000_000.0],
+        "CloseDate": pd.to_datetime(["2024-03-10", "2024-04-10", "2024-05-10", "2024-05-20", "2024-08-10"]),
+        ft.LISTING_DATE: pd.to_datetime(["2024-02-01", "2024-03-01", "2024-04-01", "2024-04-01", "2024-06-15"]),
+    })
+
+
+def test_comparables_are_nearest_earlier_sales():
+    out = ft.add_comparable_sales(comp_sales(), k=2)
+    home = out.iloc[4]
+    assert np.isclose(home["LogCompPricePerSqft"], np.log(450))  # median of the two closest: 400 and 500 per sq ft
+    assert np.isclose(home["LogCompImpliedPrice"], np.log(450 * 2000))
+    assert 0 < home["CompDistanceKm"] < 2
+
+
+def test_comparables_never_include_sales_after_listing():
+    df = comp_sales()
+    df.loc[4, ft.LISTING_DATE] = pd.Timestamp("2024-04-15")  # listed before the 2024-04 and 2024-05 sales closed
+    out = ft.add_comparable_sales(df, k=1)
+    assert np.isclose(out.iloc[4]["LogCompPricePerSqft"], np.log(400))  # only the 2024-03 sale is earlier
+
+
+def test_comparables_respect_lookback_and_missing_inputs():
+    df = comp_sales()
+    out = ft.add_comparable_sales(df, k=2, lookback_months=1)  # only 2024-05 sales count for a 2024-06 listing
+    assert np.isclose(out.iloc[4]["LogCompPricePerSqft"], np.log(750))  # 600 and 900 per sq ft
+    assert np.isnan(ft.add_comparable_sales(df, k=10).iloc[4]["LogCompPricePerSqft"])  # not enough earlier sales
+
+    df.loc[4, "Latitude"] = np.nan
+    assert ft.add_comparable_sales(df, k=2)[ft.COMP_COLS].iloc[4].isna().all()
+
+
+def test_missing_listing_date_assumes_two_months_before_close():
+    df = comp_sales()
+    df.loc[4, ft.LISTING_DATE] = pd.NaT  # closes 2024-08, so treated as listed in 2024-06
+    assert np.isclose(ft.add_comparable_sales(df, k=2).iloc[4]["LogCompPricePerSqft"], np.log(450))

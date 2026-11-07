@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from idx_exchange_data_science import dataset_a as da
-from idx_exchange_data_science.splits import close_month, time_split
+from idx_exchange_data_science.splits import split
 
 
 def raw_rows(**overrides) -> pd.DataFrame:
@@ -84,49 +84,49 @@ def test_mostly_empty_feature_is_rejected():
         da.clean(raw_rows(GarageSpaces=[np.nan, np.nan]))
 
 
-# --- splits ------------------------------------------------------------------
-
-def test_time_split_uses_only_the_months_before_test(clean_df):
-    train, test = time_split(clean_df, "2024-08", train_months=3)
-    assert set(close_month(train).astype(str)) == {"2024-05", "2024-06", "2024-07"}
-    assert set(close_month(test).astype(str)) == {"2024-08"}
-
-
-def test_time_split_needs_enough_history(clean_df):
-    with pytest.raises(ValueError):
-        time_split(clean_df, "2024-03", train_months=6)
-
-
-def test_price_limits_come_from_train_only(clean_df):
-    _, test_before = da.split(clean_df, "2024-08", 3)
-    in_test = close_month(clean_df) == pd.Period("2024-08")
-    shifted = clean_df.copy()
-    shifted.loc[in_test, da.TARGET] *= 1000  # wild test prices must not move the limits
-    train_after, test_after = da.split(shifted, "2024-08", 3)
-
-    low, high = da.price_limits(time_split(clean_df, "2024-08", 3)[0])
-    assert train_after[da.TARGET].between(low, high).all()
-    assert len(test_before) > 0 and len(test_after) == 0  # every inflated test price is above the train limit
-
-
 # --- fitted preprocessing ----------------------------------------------------
 
+def fitted_preprocessor(train: pd.DataFrame, **kwargs):
+    return da.make_preprocessor(**kwargs).fit(train, train[da.TARGET])
+
+
 def test_preprocessor_fills_everything_from_train(clean_df):
-    train, test = da.split(clean_df, "2024-08", 3)
-    pre = da.DatasetAPreprocessor()
-    X_train = pre.fit_transform(train[da.FEATURES], train[da.TARGET])
-    X_test = pre.transform(test[da.FEATURES])
+    train, test = split(clean_df, "2024-08", 3)
+    pre = da.make_preprocessor()
+    X_train = pre.fit_transform(train, train[da.TARGET])
+    X_test = pre.transform(test)
 
     assert not X_train.isna().any().any() and not X_test.isna().any().any()
     assert list(X_test.columns) == list(pre.get_feature_names_out())
+    assert len(X_test.columns) == len(da.FEATURES) + len(da.BINARY_COLS)  # features + missing flags
     missing_area = test["LivingArea"].isna()
     assert (X_test.loc[missing_area, "LivingArea"] == train["LivingArea"].median()).all()
 
 
+def test_preprocessor_never_sees_price_or_date(clean_df):
+    train, test = split(clean_df, "2024-08", 3)
+    X_test = fitted_preprocessor(train).transform(test)
+    assert da.TARGET not in X_test.columns and da.DATE_COL not in X_test.columns
+
+
+def test_missing_flags_exist_even_without_missing_values(clean_df):
+    """The column set must not depend on which values happen to be missing in a training window."""
+    train, _ = split(clean_df.fillna({col: 1.0 for col in da.BINARY_COLS}), "2024-08", 3)
+    assert len(fitted_preprocessor(train).get_feature_names_out()) == len(da.FEATURES) + len(da.BINARY_COLS)
+
+
+def test_log_features_are_logged_after_imputation(clean_df):
+    train, test = split(clean_df, "2024-08", 3)
+    X_test = fitted_preprocessor(train, log_features=True).transform(test)
+    missing_area = test["LivingArea"].isna()
+    assert np.allclose(X_test.loc[~missing_area, "LivingArea"], np.log1p(test.loc[~missing_area, "LivingArea"]))
+    assert (X_test.loc[missing_area, "LivingArea"] == np.log1p(train["LivingArea"].median())).all()
+
+
 def test_coordinates_fall_back_from_zip_to_county_to_overall(clean_df):
     train = clean_df.dropna(subset=["Latitude"])
-    pre = da.DatasetAPreprocessor().fit(train[da.FEATURES], train[da.TARGET])
-    new = train[da.FEATURES].head(3).copy()
+    pre = fitted_preprocessor(train)
+    new = train.head(3).copy()
     new["Latitude"] = np.nan
     new["PostalCode"] = ["90001", "99999", "99999"]
     new["CountyOrParish"] = ["Los Angeles", "Los Angeles", "Nowhere"]
@@ -139,15 +139,21 @@ def test_coordinates_fall_back_from_zip_to_county_to_overall(clean_df):
 
 def test_transform_rows_are_independent_of_other_test_rows(clean_df):
     """A test row's features must not depend on what else is in the test set."""
-    train, test = da.split(clean_df, "2024-08", 3)
-    pre = da.DatasetAPreprocessor().fit(train[da.FEATURES], train[da.TARGET])
-    full = pre.transform(test[da.FEATURES])
-    alone = pre.transform(test[da.FEATURES].head(1))
-    pd.testing.assert_frame_equal(full.head(1), alone)
+    train, test = split(clean_df, "2024-08", 3)
+    pre = fitted_preprocessor(train)
+    pd.testing.assert_frame_equal(pre.transform(test).head(1), pre.transform(test.head(1)))
+
+
+def test_target_encoding_is_cross_fitted_on_train(clean_df):
+    """In training, a row's encoding comes from the other folds, so it differs from the plain group mean."""
+    train, _ = split(clean_df, "2024-08", 3)
+    pre = da.make_preprocessor()
+    cross_fitted = pre.fit_transform(train, train[da.TARGET])["PostalCode"]
+    refit = pre.transform(train)["PostalCode"]
+    assert not np.allclose(cross_fitted, refit)
 
 
 def test_unseen_category_gets_a_finite_encoding(clean_df):
-    train, test = da.split(clean_df, "2024-08", 3)
-    pre = da.DatasetAPreprocessor().fit(train[da.FEATURES], train[da.TARGET])
+    train, test = split(clean_df, "2024-08", 3)
     test = test.assign(PostalCode="00000", City="Nowhere")
-    assert np.isfinite(pre.transform(test[da.FEATURES])[["PostalCode_te", "City_te"]]).all().all()
+    assert np.isfinite(fitted_preprocessor(train).transform(test)[["PostalCode", "City"]]).all().all()

@@ -8,14 +8,20 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "catboost>=1.2.10",
     "geopandas>=1.2.0",
     "ipykernel>=7.4.0",
+    "lightgbm>=4.7.0",
     "matplotlib>=3.11.2",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
     "pyarrow>=26.0.0",
+    "requests>=2.34.2",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
+    "shap>=0.54.1",
+    "structured-data-models>=0.2.1",
+    "xgboost>=3.4.1",
 ]
 
 [project.scripts]

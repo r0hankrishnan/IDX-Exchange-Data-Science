@@ -1,14 +1,14 @@
 """Dataset A: the team's agreed preprocessing (see preprocessing-procedures.md).
 
 Fixed rules run once on the whole dataset and produce the cleaned CSV. Anything
-learned from data (ClosePrice trimming, imputation, target encoding) is fit on the
-training window only.
+learned from data is fit on the training window only: the ClosePrice trim (in
+splits.py), and imputation and target encoding (make_preprocessor).
 
     df = clean(load_raw("data/intermediate/CRMLSSoldFiltered.csv"))
-    train, test = split(df, test_month="2026-04", train_months=6)
+    train, evaluation = splits.split(df, "2026-03", train_months=18)
 
-    model = make_pipeline(DatasetAPreprocessor(), LinearRegression())
-    model.fit(train[FEATURES], train[TARGET])
+    model = make_pipeline(make_preprocessor(), LinearRegression())
+    model.fit(train, train[TARGET])
 """
 
 from __future__ import annotations
@@ -19,16 +19,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.model_selection import KFold
-from sklearn.preprocessing import TargetEncoder
-
-from .splits import time_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer, TargetEncoder
 
 TARGET = "ClosePrice"
 DATE_COL = "CloseDate"
 ID_COL = "ListingKey"
 
-PRICE_QUANTILES = (0.005, 0.995)
 MAX_MISSING_SHARE = 0.8
 
 # Values outside these inclusive ranges become NaN and are imputed later.
@@ -146,8 +146,8 @@ CLEANING_STEPS: list[Callable[[pd.DataFrame], pd.DataFrame]] = [
 ]
 
 
-def clean(df: pd.DataFrame, steps: Iterable[Callable] = CLEANING_STEPS) -> pd.DataFrame:
-    for step in steps:
+def clean(df: pd.DataFrame) -> pd.DataFrame:
+    for step in CLEANING_STEPS:
         df = step(df)
     return df
 
@@ -158,97 +158,74 @@ def load_clean(path: str | Path) -> pd.DataFrame:
 
 
 # =============================================================================
-# Split with training-derived ClosePrice limits
-# =============================================================================
-
-
-def price_limits(train: pd.DataFrame, quantiles: tuple[float, float] = PRICE_QUANTILES) -> tuple[float, float]:
-    low, high = train[TARGET].quantile(quantiles)
-    return low, high
-
-
-def split(df: pd.DataFrame, test_month: str | pd.Period, train_months: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Time split, then drop ClosePrice outliers from both sides using limits from the training window."""
-    train, test = time_split(df, test_month, train_months)
-    low, high = price_limits(train)
-    return train[train[TARGET].between(low, high)], test[test[TARGET].between(low, high)]
-
-
-# =============================================================================
 # Fitted preprocessing
 # =============================================================================
 
 
-class DatasetAPreprocessor(TransformerMixin, BaseEstimator):
-    """Impute, flag, and target-encode the Dataset A features. Learns everything from the training rows.
+def make_preprocessor(numeric: Iterable[str] = (), categorical: Iterable[str] = (),
+                      log_features: bool = False) -> ColumnTransformer:
+    """Impute, flag, and target-encode the Dataset A features, plus any extra columns.
 
-    Works as the first step of an sklearn Pipeline. The target encoder is cross-fitted
-    (5 folds) on training rows, so a row's own price never goes into its encoding.
-    It encodes whatever target the pipeline is fit on, so with a log target the
-    encodings are means of log price.
+    The first step of a model Pipeline, so everything is learned from the training rows.
+    It picks its columns by name and drops the rest (ClosePrice, CloseDate, ...), so a
+    model can be fit on the whole data frame.
 
+    numeric / categorical: columns beyond FEATURES, median-imputed or target-encoded like
+    the Dataset A ones (e.g. the columns from features.py).
     log_features: log1p LivingArea and LotSizeSquareFeet (experiment for linear models).
-    extra_numeric / extra_categorical: columns beyond FEATURES, median-imputed or
-    target-encoded like the Dataset A ones (e.g. the week 6 features in features.py).
+
+    The target encoder is cross-fitted over 5 folds of the training rows, so a row's own
+    price never goes into its encoding. It encodes whatever target the model is fit on:
+    with a log target, the encodings are means of log price.
+    """
+    median_cols = MEDIAN_COLS + list(numeric)
+    if log_features:
+        median_cols = [c for c in median_cols if c not in LOG_COLS]
+    categorical_cols = CATEGORICAL_COLS + list(categorical)
+
+    steps = [
+        ("median", SimpleImputer(strategy="median"), median_cols),
+        ("mode", SimpleImputer(strategy="most_frequent"), MODE_COLS + BINARY_COLS),
+        ("missing", MissingIndicator(features="all"), BINARY_COLS),
+        ("geo", GeoImputer(), GEO_COLS + ["PostalCode", "CountyOrParish"]),
+        ("target", make_pipeline(
+            FunctionTransformer(fill_unknown, feature_names_out="one-to-one"),
+            TargetEncoder(target_type="continuous", cv=KFold(n_splits=5, shuffle=True, random_state=0)),
+        ), categorical_cols),
+    ]
+    if log_features:
+        log = make_pipeline(SimpleImputer(strategy="median"),
+                            FunctionTransformer(np.log1p, feature_names_out="one-to-one"))
+        steps.insert(1, ("log", log, LOG_COLS))
+    return ColumnTransformer(steps, verbose_feature_names_out=False).set_output(transform="pandas")
+
+
+def fill_unknown(categories: pd.DataFrame) -> pd.DataFrame:
+    return categories.astype("object").fillna(UNKNOWN)
+
+
+class GeoImputer(TransformerMixin, BaseEstimator):
+    """Fill missing Latitude/Longitude with the training median of the same ZIP, then county, then overall.
+
+    Takes the coordinates plus PostalCode and CountyOrParish; returns the coordinates only.
     """
 
-    def __init__(self, log_features: bool = False, extra_numeric: Iterable[str] = (),
-                 extra_categorical: Iterable[str] = (), random_state: int = 0):
-        self.log_features = log_features
-        self.extra_numeric = extra_numeric
-        self.extra_categorical = extra_categorical
-        self.random_state = random_state
-
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> DatasetAPreprocessor:
-        self.fit_transform(X, y)
+    def fit(self, X: pd.DataFrame, y=None) -> GeoImputer:
+        self.by_zip_ = X.groupby("PostalCode")[GEO_COLS].median()
+        self.by_county_ = X.groupby("CountyOrParish")[GEO_COLS].median()
+        self.overall_ = X[GEO_COLS].median()
         return self
 
-    def fit_transform(self, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
-        self.medians_ = X[self._median_cols()].median()
-        self.modes_ = X[MODE_COLS + BINARY_COLS].mode().iloc[0]
-        self.geo_by_zip_ = X.groupby("PostalCode")[GEO_COLS].median()
-        self.geo_by_county_ = X.groupby("CountyOrParish")[GEO_COLS].median()
-        self.geo_overall_ = X[GEO_COLS].median()
-
-        cv = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
-        self.encoder_ = TargetEncoder(target_type="continuous", cv=cv)
-        encoded = self.encoder_.fit_transform(self._categories(X), y)
-        return self._finish(X, encoded)
-
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        return self._finish(X, self.encoder_.transform(self._categories(X)))
-
-    def get_feature_names_out(self, input_features=None) -> np.ndarray:
-        return np.array(self.feature_names_out_)
-
-    def _median_cols(self) -> list[str]:
-        return MEDIAN_COLS + list(self.extra_numeric)
-
-    def _categorical_cols(self) -> list[str]:
-        return CATEGORICAL_COLS + list(self.extra_categorical)
-
-    def _categories(self, X: pd.DataFrame) -> pd.DataFrame:
-        return X[self._categorical_cols()].astype("object").fillna(UNKNOWN)
-
-    def _finish(self, X: pd.DataFrame, encoded: np.ndarray) -> pd.DataFrame:
-        median_cols = self._median_cols()
-        out = X[median_cols + MODE_COLS + BINARY_COLS + GEO_COLS].copy()
-        for col in BINARY_COLS:
-            out[f"{col}_missing"] = out[col].isna().astype(float)
-
-        out[median_cols] = out[median_cols].fillna(self.medians_)
-        out[MODE_COLS + BINARY_COLS] = out[MODE_COLS + BINARY_COLS].fillna(self.modes_)
+        out = X[GEO_COLS].copy()
         for col in GEO_COLS:
             out[col] = (
                 out[col]
-                .fillna(X["PostalCode"].map(self.geo_by_zip_[col]))
-                .fillna(X["CountyOrParish"].map(self.geo_by_county_[col]))
-                .fillna(self.geo_overall_[col])
+                .fillna(X["PostalCode"].map(self.by_zip_[col]))
+                .fillna(X["CountyOrParish"].map(self.by_county_[col]))
+                .fillna(self.overall_[col])
             )
-        if self.log_features:
-            out[LOG_COLS] = np.log1p(out[LOG_COLS])
-
-        for i, col in enumerate(self._categorical_cols()):
-            out[f"{col}_te"] = encoded[:, i]
-        self.feature_names_out_ = list(out.columns)
         return out
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        return np.array(GEO_COLS, dtype=object)

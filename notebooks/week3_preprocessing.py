@@ -1,4 +1,6 @@
-"""Preprocessing for the CRMLS single-family AVM (predict ClosePrice before listing).
+"""Week 3 individual preprocessing (used only by 02_preprocessing.ipynb; Dataset A replaced it).
+
+Preprocessing for the CRMLS single-family AVM (predict ClosePrice before listing).
 
 Three stages, each chainable:
 
@@ -29,7 +31,7 @@ imputation strategy per column) is in the CONFIG block below.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +39,6 @@ import pandas as pd
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, TargetEncoder
 
-from .splits import close_month, time_split, validation_months, window_splits  # noqa: F401
 
 # =============================================================================
 # CONFIG
@@ -117,6 +118,41 @@ LOG_COLS = ["LivingArea", "LotSizeSquareFeet", "AssociationFeeMonthly"]  # heavy
 # =============================================================================
 # Stage 1: stateless cleaning
 # =============================================================================
+
+
+# Time-based splits (the week 3 versions; the project code now uses idx_exchange_data_science.splits).
+
+def close_month(df: pd.DataFrame) -> pd.Series:
+    return df[DATE_COL].dt.to_period("M")
+
+
+def time_split(df: pd.DataFrame, test_month: str | pd.Period, train_months: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Test = `test_month`; train = the `train_months` months immediately before it."""
+    test_month = pd.Period(test_month, freq="M")
+    month = close_month(df)
+    first_train = test_month - train_months
+    if first_train < month.min():
+        raise ValueError(f"Not enough history: {train_months} months before {test_month} starts at {first_train}, "
+                         f"data starts at {month.min()}")
+    train = df[(month >= first_train) & (month < test_month)]
+    test = df[month == test_month]
+    return train.reset_index(drop=True), test.reset_index(drop=True)
+
+
+def validation_months(test_month: str | pd.Period, n_months: int = 1) -> list[pd.Period]:
+    """The `n_months` months right before `test_month`, oldest first."""
+    test_month = pd.Period(test_month, freq="M")
+    return list(pd.period_range(test_month - n_months, test_month - 1, freq="M"))
+
+
+def window_splits(df: pd.DataFrame, eval_months: Iterable[str | pd.Period],
+                  windows: Iterable[int]) -> Iterator[tuple[int, pd.Period, pd.DataFrame, pd.DataFrame]]:
+    """Yield (train_months, eval_month, train, eval) for every window x eval month."""
+    for x in windows:
+        for month in eval_months:
+            month = pd.Period(month, freq="M")
+            train, evaluation = time_split(df, month, x)
+            yield x, month, train, evaluation
 
 
 def load_filtered(path: str | Path) -> pd.DataFrame:

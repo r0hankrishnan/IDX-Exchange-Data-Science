@@ -219,3 +219,5 @@ __marimo__/
 
 # Data
 data/*
+# CatBoost training logs
+catboost_info/
