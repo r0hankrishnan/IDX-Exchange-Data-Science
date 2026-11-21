@@ -105,6 +105,28 @@ def add_listing_date(df: pd.DataFrame, listing_dates: pd.DataFrame) -> pd.DataFr
     return out
 
 
+def listing_months(df: pd.DataFrame) -> pd.Series:
+    """Each home's listing month. Homes with no listing date are assumed to list 2 months before close."""
+    close_month = df["CloseDate"].dt.to_period("M")
+    return df[LISTING_DATE].dt.to_period("M").fillna(close_month - DEFAULT_MONTHS_TO_CLOSE)
+
+
+def price_per_sqft(df: pd.DataFrame) -> pd.Series:
+    return df["ClosePrice"] / df["LivingArea"].where(df["LivingArea"] > 0)
+
+
+def has_coordinates(df: pd.DataFrame) -> pd.Series:
+    return df[["Latitude", "Longitude"]].notna().all(axis=1)
+
+
+def comparable_pool(df: pd.DataFrame, month: pd.Period, lookback_months: int = COMP_LOOKBACK_MONTHS) -> pd.Series:
+    """The sales a home listed in `month` can use as comparables: closed in the `lookback_months`
+    before it, with coordinates and a price per square foot."""
+    close_month = df["CloseDate"].dt.to_period("M")
+    earlier = (close_month < month) & (close_month >= month - lookback_months)
+    return earlier & has_coordinates(df) & price_per_sqft(df).notna()
+
+
 def add_comparable_sales(df: pd.DataFrame, k: int = COMP_K,
                          lookback_months: int = COMP_LOOKBACK_MONTHS) -> pd.DataFrame:
     """Price of the k nearest sales that closed in the `lookback_months` before the home's listing month.
@@ -115,27 +137,41 @@ def add_comparable_sales(df: pd.DataFrame, k: int = COMP_K,
     The home's own sale is never a comparable, because it closes after it lists.
     NaN when the home has no coordinates or fewer than k earlier sales exist.
     """
-    close_month = df["CloseDate"].dt.to_period("M")
-    listing_month = df[LISTING_DATE].dt.to_period("M").fillna(close_month - DEFAULT_MONTHS_TO_CLOSE)
-    has_coords = df[["Latitude", "Longitude"]].notna().all(axis=1)
-    price_per_sqft = df["ClosePrice"] / df["LivingArea"].where(df["LivingArea"] > 0)
+    listing_month = listing_months(df)
+    has_coords = has_coordinates(df)
+    ppsf = price_per_sqft(df).to_numpy()
     coords = np.radians(df[["Latitude", "Longitude"]].to_numpy())
 
     comp_ppsf = np.full(len(df), np.nan)
     comp_distance = np.full(len(df), np.nan)
     for month in listing_month.dropna().unique():
-        earlier = (close_month < month) & (close_month >= month - lookback_months)
-        pool = (earlier & has_coords & price_per_sqft.notna()).to_numpy()
+        pool = comparable_pool(df, month, lookback_months).to_numpy()
         homes = ((listing_month == month) & has_coords).to_numpy()
         if pool.sum() < k or not homes.any():
             continue
         distance, nearest = BallTree(coords[pool], metric="haversine").query(coords[homes], k=k)
-        comp_ppsf[homes] = np.median(price_per_sqft.to_numpy()[pool][nearest], axis=1)
+        comp_ppsf[homes] = np.median(ppsf[pool][nearest], axis=1)
         comp_distance[homes] = distance.mean(axis=1) * EARTH_RADIUS_KM
 
     return df.assign(LogCompPricePerSqft=np.log(comp_ppsf),
                      LogCompImpliedPrice=np.log(comp_ppsf * df["LivingArea"].where(df["LivingArea"] > 0)),
                      CompDistanceKm=comp_distance)
+
+
+def find_comparables(df: pd.DataFrame, index, k: int = COMP_K,
+                     lookback_months: int = COMP_LOOKBACK_MONTHS) -> pd.DataFrame:
+    """The k sales behind one home's comparable-sales features (the row of `df` at `index`), nearest first.
+
+    Adds DistanceKm and PricePerSqft. Empty when the home has no coordinates or too few earlier sales.
+    """
+    home = df.loc[[index]]
+    pool = df[comparable_pool(df, listing_months(home).iloc[0], lookback_months)]
+    if not has_coordinates(home).iloc[0] or len(pool) < k:
+        return pool.iloc[:0].assign(DistanceKm=[], PricePerSqft=[])
+    tree = BallTree(np.radians(pool[["Latitude", "Longitude"]].to_numpy()), metric="haversine")
+    distance, nearest = tree.query(np.radians(home[["Latitude", "Longitude"]].to_numpy()), k=k)
+    comps = pool.iloc[nearest[0]]
+    return comps.assign(DistanceKm=distance[0] * EARTH_RADIUS_KM, PricePerSqft=price_per_sqft(comps))
 
 
 def build_table() -> pd.DataFrame:

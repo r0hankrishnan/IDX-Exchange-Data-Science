@@ -20,6 +20,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
     "shap>=0.54.1",
+    "streamlit>=1.67.0",
     "structured-data-models>=0.2.1",
     "xgboost>=3.4.1",
 ]

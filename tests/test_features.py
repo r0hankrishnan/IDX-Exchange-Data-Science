@@ -123,6 +123,16 @@ def test_comparables_respect_lookback_and_missing_inputs():
     assert ft.add_comparable_sales(df, k=2)[ft.COMP_COLS].iloc[4].isna().all()
 
 
+def test_find_comparables_matches_the_feature():
+    df = comp_sales()
+    home = ft.add_comparable_sales(df, k=2).iloc[4]
+    comps = ft.find_comparables(df, 4, k=2)
+    assert comps.index.tolist() == [0, 1]  # nearest first
+    assert np.isclose(np.log(comps["PricePerSqft"].median()), home["LogCompPricePerSqft"])
+    assert np.isclose(comps["DistanceKm"].mean(), home["CompDistanceKm"])
+    assert ft.find_comparables(df, 4, k=10).empty  # not enough earlier sales
+
+
 def test_missing_listing_date_assumes_two_months_before_close():
     df = comp_sales()
     df.loc[4, ft.LISTING_DATE] = pd.NaT  # closes 2024-08, so treated as listed in 2024-06
