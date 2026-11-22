@@ -1,29 +1,22 @@
-"""Dataset A: the team's agreed preprocessing (see preprocessing-procedures.md).
+"""Dataset A cleaning: the team's fixed rules (see preprocessing-procedures.md).
 
-Fixed rules run once on the whole dataset and produce the cleaned CSV. Anything
-learned from data is fit on the training window only: the ClosePrice trim (in
-splits.py), and imputation and target encoding (make_preprocessor).
+These rules look at one row at a time and learn nothing from the data, so they run once on
+the whole dataset, before any split:
 
-    df = clean(load_raw("data/intermediate/CRMLSSoldFiltered.csv"))
-    train, evaluation = splits.split(df, "2026-03", train_months=18)
+    df = clean(load_raw(FILTERED_PATH))   # notebooks/02b_preprocessing_dataset_a.ipynb
+    df.to_csv(DATASET_A_PATH, index=False)
+    df = load_clean(DATASET_A_PATH)
 
-    model = make_pipeline(make_preprocessor(), LinearRegression())
-    model.fit(train, train[TARGET])
+Anything learned from data (the ClosePrice trim, imputation, encoding) is fit on the training
+window only, in splits.py and preprocessing.py.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import MissingIndicator, SimpleImputer
-from sklearn.model_selection import KFold
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, TargetEncoder
 
 TARGET = "ClosePrice"
 DATE_COL = "CloseDate"
@@ -51,11 +44,6 @@ LOG_COLS = ["LivingArea", "LotSizeSquareFeet"]
 UNKNOWN = "Unknown"
 
 FEATURES = MEDIAN_COLS + MODE_COLS + BINARY_COLS + GEO_COLS + CATEGORICAL_COLS
-
-
-# =============================================================================
-# Fixed cleaning rules (no fitting, safe to run before the split)
-# =============================================================================
 
 
 def load_raw(path: str | Path) -> pd.DataFrame:
@@ -155,77 +143,3 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
 def load_clean(path: str | Path) -> pd.DataFrame:
     """Read a cleaned CSV written by `clean(...).to_csv(...)`."""
     return pd.read_csv(path, parse_dates=[DATE_COL], dtype={"PostalCode": "string", "City": "string"})
-
-
-# =============================================================================
-# Fitted preprocessing
-# =============================================================================
-
-
-def make_preprocessor(numeric: Iterable[str] = (), categorical: Iterable[str] = (),
-                      log_features: bool = False) -> ColumnTransformer:
-    """Impute, flag, and target-encode the Dataset A features, plus any extra columns.
-
-    The first step of a model Pipeline, so everything is learned from the training rows.
-    It picks its columns by name and drops the rest (ClosePrice, CloseDate, ...), so a
-    model can be fit on the whole data frame.
-
-    numeric / categorical: columns beyond FEATURES, median-imputed or target-encoded like
-    the Dataset A ones (e.g. the columns from features.py).
-    log_features: log1p LivingArea and LotSizeSquareFeet (experiment for linear models).
-
-    The target encoder is cross-fitted over 5 folds of the training rows, so a row's own
-    price never goes into its encoding. It encodes whatever target the model is fit on:
-    with a log target, the encodings are means of log price.
-    """
-    median_cols = MEDIAN_COLS + list(numeric)
-    if log_features:
-        median_cols = [c for c in median_cols if c not in LOG_COLS]
-    categorical_cols = CATEGORICAL_COLS + list(categorical)
-
-    steps = [
-        ("median", SimpleImputer(strategy="median"), median_cols),
-        ("mode", SimpleImputer(strategy="most_frequent"), MODE_COLS + BINARY_COLS),
-        ("missing", MissingIndicator(features="all"), BINARY_COLS),
-        ("geo", GeoImputer(), GEO_COLS + ["PostalCode", "CountyOrParish"]),
-        ("target", make_pipeline(
-            FunctionTransformer(fill_unknown, feature_names_out="one-to-one"),
-            TargetEncoder(target_type="continuous", cv=KFold(n_splits=5, shuffle=True, random_state=0)),
-        ), categorical_cols),
-    ]
-    if log_features:
-        log = make_pipeline(SimpleImputer(strategy="median"),
-                            FunctionTransformer(np.log1p, feature_names_out="one-to-one"))
-        steps.insert(1, ("log", log, LOG_COLS))
-    return ColumnTransformer(steps, verbose_feature_names_out=False).set_output(transform="pandas")
-
-
-def fill_unknown(categories: pd.DataFrame) -> pd.DataFrame:
-    return categories.astype("object").fillna(UNKNOWN)
-
-
-class GeoImputer(TransformerMixin, BaseEstimator):
-    """Fill missing Latitude/Longitude with the training median of the same ZIP, then county, then overall.
-
-    Takes the coordinates plus PostalCode and CountyOrParish; returns the coordinates only.
-    """
-
-    def fit(self, X: pd.DataFrame, y=None) -> GeoImputer:
-        self.by_zip_ = X.groupby("PostalCode")[GEO_COLS].median()
-        self.by_county_ = X.groupby("CountyOrParish")[GEO_COLS].median()
-        self.overall_ = X[GEO_COLS].median()
-        return self
-
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        out = X[GEO_COLS].copy()
-        for col in GEO_COLS:
-            out[col] = (
-                out[col]
-                .fillna(X["PostalCode"].map(self.by_zip_[col]))
-                .fillna(X["CountyOrParish"].map(self.by_county_[col]))
-                .fillna(self.overall_[col])
-            )
-        return out
-
-    def get_feature_names_out(self, input_features=None) -> np.ndarray:
-        return np.array(GEO_COLS, dtype=object)

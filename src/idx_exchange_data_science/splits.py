@@ -18,7 +18,7 @@ from collections.abc import Iterable, Iterator
 import numpy as np
 import pandas as pd
 
-from .dataset_a import DATE_COL, TARGET
+from .cleaning import DATE_COL, TARGET
 
 PRICE_QUANTILES = (0.005, 0.995)
 

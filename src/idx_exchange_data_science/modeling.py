@@ -21,11 +21,13 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, r2_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBRegressor
 
-from .dataset_a import TARGET, make_preprocessor
+from .cleaning import TARGET
+from .preprocessing import make_preprocessor
 from .splits import MonthSplit, split
 
 
@@ -46,6 +48,17 @@ def random_forest() -> RandomForestRegressor:
     return RandomForestRegressor(n_estimators=200, min_samples_leaf=2, max_features=1 / 3, n_jobs=-1, random_state=0)
 
 
+def tuned_xgboost(**overrides) -> XGBRegressor:
+    """XGBoost with the settings from the random search in 06 (tuning month 2025-09).
+
+    The team's unified pipeline doc lists nearly the same settings (learning rate 0.1).
+    Keyword arguments override any setting.
+    """
+    settings = dict(tree_method="hist", n_estimators=600, learning_rate=0.092, max_depth=8, min_child_weight=1,
+                    subsample=1.0, colsample_bytree=0.5, n_jobs=-1, random_state=0)
+    return XGBRegressor(**{**settings, **overrides})
+
+
 def linear_baseline(numeric: Iterable[str] = (), categorical: Iterable[str] = ()) -> BaseEstimator:
     """The week 4 baseline: linear regression with log target and log size features."""
     return build_model(LinearRegression(), make_preprocessor(numeric, categorical, log_features=True),
@@ -58,18 +71,28 @@ def final_estimator(model: BaseEstimator) -> BaseEstimator:
     return pipeline[-1]
 
 
+def median_ape(y_true, y_pred) -> float:
+    """Median absolute percentage error: the decision metric (a typical home's error)."""
+    return np.median(np.abs(np.asarray(y_pred) / np.asarray(y_true) - 1))
+
+
+def within_10pct(y_true, y_pred) -> float:
+    """Share of homes predicted within 10% of the sale price."""
+    return np.mean(np.abs(np.asarray(y_pred) / np.asarray(y_true) - 1) < 0.1)
+
+
+# Dollar-scale metrics, name -> function(y_true, y_pred). mape is the *mean* absolute % error.
+METRICS = {
+    "r2": r2_score,
+    "mae": mean_absolute_error,
+    "mape": mean_absolute_percentage_error,
+    "median_ape": median_ape,
+    "within_10pct": within_10pct,
+}
+
+
 def score(y_true, y_pred) -> dict[str, float]:
-    """Dollar-scale metrics. mape is the mean absolute % error; median_ape and within_10pct
-    are the usual accuracy measures for home valuation models."""
-    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
-    pct_error = np.abs(y_pred / y_true - 1)
-    return {
-        "r2": r2_score(y_true, y_pred),
-        "mae": mean_absolute_error(y_true, y_pred),
-        "mape": pct_error.mean(),
-        "median_ape": np.median(pct_error),
-        "within_10pct": (pct_error < 0.1).mean(),
-    }
+    return {name: float(metric(y_true, y_pred)) for name, metric in METRICS.items()}
 
 
 def backtest(models: dict[str, BaseEstimator], df: pd.DataFrame, months: Iterable[str | pd.Period],
@@ -77,7 +100,10 @@ def backtest(models: dict[str, BaseEstimator], df: pd.DataFrame, months: Iterabl
     """Fit a fresh copy of each model on the `train_months` before each month, then score it on that month.
 
     Returns the scores (one row per model and month) and the predictions (one column per
-    model, indexed like the evaluated rows of `df`).
+    model, indexed like the evaluated rows of `df`). Scores on the evaluated month are named
+    after the metric (r2, median_ape, ...). The same metrics on the model's own training rows
+    are prefixed with train_, to show overfitting. Like sklearn's return_train_score, these are
+    in-sample, so they are optimistic.
     """
     cv = MonthSplit(months, train_months, gap)
     y = df[TARGET]
@@ -86,9 +112,12 @@ def backtest(models: dict[str, BaseEstimator], df: pd.DataFrame, months: Iterabl
         train, evaluation = df.iloc[train_rows], df.iloc[eval_rows]
         month_predictions = pd.DataFrame(index=evaluation.index)
         for name, model in models.items():
-            month_predictions[name] = clone(model).fit(train, train[TARGET]).predict(evaluation)
+            fitted = clone(model).fit(train, train[TARGET])
+            month_predictions[name] = fitted.predict(evaluation)
+            train_scores = score(train[TARGET], fitted.predict(train))
             scores.append({"model": name, "month": str(month), "n_train": len(train),
-                           **score(evaluation[TARGET], month_predictions[name])})
+                           **score(evaluation[TARGET], month_predictions[name]),
+                           **{f"train_{metric}": value for metric, value in train_scores.items()}})
         predictions.append(month_predictions)
     return pd.DataFrame(scores), pd.concat(predictions)
 
