@@ -1,5 +1,17 @@
 [theme]
-primaryColor = "#2a78d6"
+base = "light"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+baseRadius = "10px"
+showWidgetBorder = true
+primaryColor = "#3B5BDB"
+backgroundColor = "#FAFAF9"
+secondaryBackgroundColor = "#F2F2F0"
+textColor = "#18181B"
+borderColor = "#E4E4E0"
+
+[client]
+toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
