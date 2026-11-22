@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import box
 
-from idx_exchange_data_science import dataset_a as da
+from idx_exchange_data_science import cleaning as cl
+from idx_exchange_data_science.preprocessing import make_preprocessor
 from idx_exchange_data_science import features as ft
 from idx_exchange_data_science.splits import split
 
@@ -47,8 +48,8 @@ def with_districts(clean_df: pd.DataFrame) -> pd.DataFrame:
 
 def test_extra_columns_are_imputed_and_encoded_from_train(clean_df):
     train, test = split(with_districts(clean_df), "2024-08", 3)
-    pre = da.make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
-    X_train = pre.fit_transform(train, train[da.TARGET])
+    pre = make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
+    X_train = pre.fit_transform(train, train[cl.TARGET])
     X_test = pre.transform(test)
 
     assert not X_train.isna().any().any() and not X_test.isna().any().any()
@@ -60,8 +61,8 @@ def test_extra_columns_are_imputed_and_encoded_from_train(clean_df):
 
 def test_extra_columns_keep_test_rows_independent(clean_df):
     train, test = split(with_districts(clean_df), "2024-08", 3)
-    pre = da.make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
-    pre.fit(train, train[da.TARGET])
+    pre = make_preprocessor(numeric=ft.DISTRICT_NUMERIC_COLS, categorical=ft.DISTRICT_COLS)
+    pre.fit(train, train[cl.TARGET])
     pd.testing.assert_frame_equal(pre.transform(test).head(1), pre.transform(test.head(1)))
 
 
@@ -126,14 +127,102 @@ def test_comparables_respect_lookback_and_missing_inputs():
 def test_find_comparables_matches_the_feature():
     df = comp_sales()
     home = ft.add_comparable_sales(df, k=2).iloc[4]
-    comps = ft.find_comparables(df, 4, k=2)
+    comps = ft.find_comparables(df, df.loc[[4]], k=2)
     assert comps.index.tolist() == [0, 1]  # nearest first
-    assert np.isclose(np.log(comps["PricePerSqft"].median()), home["LogCompPricePerSqft"])
-    assert np.isclose(comps["DistanceKm"].mean(), home["CompDistanceKm"])
-    assert ft.find_comparables(df, 4, k=10).empty  # not enough earlier sales
+    features = ft.comparable_features(comps, df.loc[4, "LivingArea"])
+    for col in ft.COMP_COLS:
+        assert np.isclose(features[col], home[col])
+    assert ft.find_comparables(df, df.loc[[4]], k=10).empty  # not enough earlier sales
+    assert np.isnan(ft.comparable_features(comps.iloc[:0], 1000.0)["LogCompPricePerSqft"])
+
+
+def test_find_comparables_works_for_a_home_not_in_the_sales():
+    df = comp_sales()
+    new_home = df.loc[[4]].assign(Longitude=-118.019)  # next to the 2024-05 sale
+    assert ft.find_comparables(df.drop(index=4), new_home, k=1).index.tolist() == [2]
 
 
 def test_missing_listing_date_assumes_two_months_before_close():
     df = comp_sales()
     df.loc[4, ft.LISTING_DATE] = pd.NaT  # closes 2024-08, so treated as listed in 2024-06
     assert np.isclose(ft.add_comparable_sales(df, k=2).iloc[4]["LogCompPricePerSqft"], np.log(450))
+
+
+# --- HOA, flooring and MLS district ------------------------------------------------
+
+def test_hoa_fee_is_monthly_with_flags():
+    df = pd.DataFrame({"AssociationFee": [300.0, 1200.0, 0.0, np.nan, 50.0],
+                       "AssociationFeeFrequency": ["Quarterly", "Annually", "Monthly", None, None]})
+    out = ft.add_hoa(df)
+    assert out["HOAFeeMonthly"].iloc[:3].tolist() == [100.0, 100.0, 0.0]
+    assert out["HOAFeeMonthly"].iloc[4] == 50.0  # blank frequency taken as monthly
+    assert out["HasHOA"].tolist() == [1.0, 1.0, 0.0, 0.0, 1.0]
+    assert out["HOAFeeMissing"].tolist() == [0.0, 0.0, 0.0, 1.0, 0.0]
+    assert np.isnan(out["HOAFeeMonthly"].iloc[3])  # imputed later, from training rows
+    assert list(out.columns) == ft.HOA_COLS
+
+
+def test_flooring_flags_match_whole_types_only():
+    df = pd.DataFrame({"Flooring": ["Carpet,Tile", " Wood , Vinyl", "SeeRemarks", None, "Stone"]})
+    out = ft.add_flooring(df)
+    assert out["FlooringTile"].tolist() == [1.0, 0.0, 0.0, 0.0, 0.0]
+    assert out["FlooringWood"].tolist() == [0.0, 1.0, 0.0, 0.0, 0.0]
+    assert out["FlooringSeeRemarks"].tolist() == [0.0, 0.0, 1.0, 0.0, 0.0]
+    assert out["FlooringMissing"].tolist() == [0.0, 0.0, 0.0, 1.0, 0.0]
+    assert out.iloc[4].sum() == 0  # a type not on the list sets no flag
+    assert list(out.columns) == ft.FLOORING_COLS
+
+
+def test_mls_district_blanks_are_missing():
+    out = ft.add_mls_district(pd.DataFrame({"HighSchoolDistrict": [" Irvine Unified ", "", None]}))
+    assert out["MLSHighSchoolDistrict"].iloc[0] == "Irvine Unified"
+    assert out["MLSHighSchoolDistrict"].iloc[1:].isna().all()
+
+
+# --- similar comparable sales -------------------------------------------------------
+
+def similar_sales() -> pd.DataFrame:
+    """Three earlier sales and one home (index 3, 3,000 sq ft) listed after them, all on one line of latitude.
+
+    Sales 0 and 1 are the nearest but much smaller; sale 2 is farther (~2 km) but the same size as the home.
+    """
+    return pd.DataFrame({
+        "Latitude": [34.0] * 4,
+        "Longitude": [-118.005, -118.006, -118.022, -118.000],
+        "LivingArea": [1000.0, 1000.0, 3000.0, 3000.0],
+        "LotSizeSquareFeet": [6000.0] * 4,
+        "PropertyAge": [30.0] * 4,
+        "BedroomsTotal": [3.0, 3.0, 4.0, 4.0],
+        "BathroomsTotalInteger": [2.0, 2.0, 3.0, 3.0],
+        "ClosePrice": [500_000.0, 520_000.0, 1_800_000.0, 2_000_000.0],
+        "CloseDate": pd.to_datetime(["2024-03-10", "2024-03-12", "2024-03-15", "2024-08-10"]),
+        ft.LISTING_DATE: pd.to_datetime(["2024-02-01", "2024-02-01", "2024-02-01", "2024-06-15"]),
+    })
+
+
+def test_similar_sales_prefer_a_similar_home_over_a_nearer_one():
+    out = ft.add_similar_sales(similar_sales(), k=1)
+    home = out.iloc[3]
+    assert np.isclose(home["LogSimilarPricePerSqft"], np.log(1_800_000 / 3000))  # sale 2, not the nearer sale 0
+    assert np.isclose(home["LogSimilarImpliedPrice"], np.log(1_800_000))
+    assert 1.5 < home["SimilarDistanceKm"] < 2.5
+    nearest = ft.add_comparable_sales(similar_sales(), k=1).iloc[3]
+    assert np.isclose(nearest["LogCompPricePerSqft"], np.log(500))  # the plain feature takes the nearest sale
+
+
+def test_similar_sales_equal_nearest_sales_when_homes_are_alike():
+    """With identical attributes only distance counts, so the result equals add_comparable_sales (same timing rule)."""
+    df = comp_sales().assign(LotSizeSquareFeet=6000.0, PropertyAge=30.0, BedroomsTotal=3.0, BathroomsTotalInteger=2.0)
+    df["LivingArea"] = 1000.0
+    similar, nearest = ft.add_similar_sales(df, k=2).iloc[4], ft.add_comparable_sales(df, k=2).iloc[4]
+    assert np.isclose(similar["LogSimilarPricePerSqft"], nearest["LogCompPricePerSqft"])
+    assert np.isclose(similar["SimilarDistanceKm"], nearest["CompDistanceKm"])
+    assert np.isclose(nearest["LogCompMedianPrice"], np.log(450_000))  # median of the 400K and 500K sales
+
+
+def test_similar_sales_ignore_missing_attributes():
+    df = similar_sales()
+    df.loc[3, ["BedroomsTotal", "PropertyAge"]] = np.nan
+    home = ft.add_similar_sales(df, k=1).iloc[3]
+    assert np.isclose(home["LogSimilarPricePerSqft"], np.log(600))  # still matched on living area
+    assert np.isfinite(home["SimilarMatchScore"])

@@ -6,7 +6,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_validate
 from sklearn.tree import DecisionTreeRegressor
 
-from idx_exchange_data_science import dataset_a as da
+from idx_exchange_data_science import cleaning as cl
 from idx_exchange_data_science.modeling import (
     backtest, build_model, final_estimator, fit_window, gain_summary, linear_baseline, median_ape_by, score,
 )
@@ -25,7 +25,7 @@ def test_evaluation_prices_never_reach_the_model(clean_df, name):
     """Predictions must not change when the evaluated rows' ClosePrice values change."""
     model = fit_window(MODELS[name], clean_df, "2024-08", 3)
     _, evaluation = split(clean_df, "2024-08", 3)
-    scrambled = evaluation.assign(**{da.TARGET: evaluation[da.TARGET].sample(frac=1, random_state=1).to_numpy()})
+    scrambled = evaluation.assign(**{cl.TARGET: evaluation[cl.TARGET].sample(frac=1, random_state=1).to_numpy()})
     np.testing.assert_allclose(model.predict(evaluation), model.predict(scrambled))
 
 
@@ -37,7 +37,7 @@ def test_models_learn_something(clean_df, name):
 
 def test_log_target_predicts_dollars(clean_df):
     _, predictions = backtest({"linear log": MODELS["linear log"]}, clean_df, ["2024-08"], 3)
-    ratio = predictions["linear log"] / clean_df.loc[predictions.index, da.TARGET]
+    ratio = predictions["linear log"] / clean_df.loc[predictions.index, cl.TARGET]
     assert 0.5 < ratio.median() < 2
 
 
@@ -53,16 +53,17 @@ def test_backtest_scores_each_model_and_month_on_the_same_rows(clean_df):
     _, june = split(clean_df, "2024-06", 3)
     _, july = split(clean_df, "2024-07", 3)
     assert predictions.index.equals(june.index.append(july.index))
-    june_scores = score(june[da.TARGET], predictions.loc[june.index, "tree"])
+    june_scores = score(june[cl.TARGET], predictions.loc[june.index, "tree"])
     assert scores.query("model == 'tree' and month == '2024-06'")["r2"].item() == pytest.approx(june_scores["r2"])
 
 
 def test_backtest_matches_cross_validate(clean_df):
-    """MonthSplit is a regular sklearn splitter, so cross_validate gives the same scores."""
+    """MonthSplit is a regular sklearn splitter, so cross_validate gives the same scores, train scores included."""
     scores, _ = backtest({"linear": MODELS["linear"]}, clean_df, ["2024-06", "2024-07"], 3)
-    cv = cross_validate(MODELS["linear"], clean_df, clean_df[da.TARGET], scoring="r2",
+    cv = cross_validate(MODELS["linear"], clean_df, clean_df[cl.TARGET], scoring="r2", return_train_score=True,
                         cv=MonthSplit(["2024-06", "2024-07"], 3))
     np.testing.assert_allclose(scores["r2"], cv["test_score"])
+    np.testing.assert_allclose(scores["train_r2"], cv["train_score"])
 
 
 def test_score():
