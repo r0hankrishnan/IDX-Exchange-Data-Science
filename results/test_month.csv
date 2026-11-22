@@ -1,0 +1,6 @@
+metric,validation,test,model,test_month,n_test
+median_ape,0.0722933685436319,0.07399526848591553,XGBoost (06 settings) | Districts + HOA + flooring + comps | log price,2026-04,12309
+r2,0.9131837590016302,0.9151897751257325,XGBoost (06 settings) | Districts + HOA + flooring + comps | log price,2026-04,12309
+mae,136021.7242195061,143886.79828276057,XGBoost (06 settings) | Districts + HOA + flooring + comps | log price,2026-04,12309
+mape,0.1062156132276246,0.10562672609754753,XGBoost (06 settings) | Districts + HOA + flooring + comps | log price,2026-04,12309
+within_10pct,0.6272442463745888,0.620927776423755,XGBoost (06 settings) | Districts + HOA + flooring + comps | log price,2026-04,12309
