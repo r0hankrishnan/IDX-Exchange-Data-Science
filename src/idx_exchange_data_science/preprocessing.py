@@ -34,11 +34,16 @@ def make_preprocessor(numeric: Iterable[str] = (), categorical: Iterable[str] = 
     the Dataset A ones (e.g. the columns from features.py).
     log_features: log1p LivingArea and LotSizeSquareFeet (experiment for linear models).
 
+    Missing flags (as in the team's unified pipeline): one for each median-imputed column, yes/no
+    field and coordinate. The flags exist even when a training window has no missing values, so
+    the columns do not change between windows.
+
     The target encoder is cross-fitted over 5 folds of the training rows, so a row's own
     price never goes into its encoding. It encodes whatever target the model is fit on:
     with a log target, the encodings are means of log price.
     """
     median_cols = MEDIAN_COLS + list(numeric)
+    flagged_cols = median_cols + BINARY_COLS + GEO_COLS
     if log_features:
         median_cols = [c for c in median_cols if c not in LOG_COLS]
     categorical_cols = CATEGORICAL_COLS + list(categorical)
@@ -46,7 +51,7 @@ def make_preprocessor(numeric: Iterable[str] = (), categorical: Iterable[str] = 
     steps = [
         ("median", SimpleImputer(strategy="median"), median_cols),
         ("mode", SimpleImputer(strategy="most_frequent"), MODE_COLS + BINARY_COLS),
-        ("missing", MissingIndicator(features="all"), BINARY_COLS),
+        ("missing", MissingIndicator(features="all"), flagged_cols),
         ("geo", GeoImputer(), GEO_COLS + ["PostalCode", "CountyOrParish"]),
         ("target", make_pipeline(
             FunctionTransformer(fill_unknown, feature_names_out="one-to-one"),

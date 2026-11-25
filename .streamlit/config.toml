@@ -2,7 +2,7 @@
 base = "light"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
 headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
-baseRadius = "10px"
+baseRadius = "12px"
 showWidgetBorder = true
 primaryColor = "#3B5BDB"
 backgroundColor = "#FAFAF9"

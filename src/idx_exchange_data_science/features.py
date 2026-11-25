@@ -13,6 +13,8 @@ Feature groups (pass the column lists to `make_preprocessor(numeric=..., categor
   serving its high school grades (the same district in unified areas).
 - MLS district (MLS_DISTRICT_COLS): the high school district as typed into the listing. The
   MLS elementary district column is empty in this data.
+- Room ratios (RATIO_COLS): the team's default ratio group (bedrooms per bathroom, square feet per
+  bedroom, log of lot size over living area), as in the unified feature engineering script.
 - HOA (HOA_COLS): monthly HOA fee, whether there is one, and whether the fee is missing.
 - Flooring (FLOORING_COLS): one 0/1 column per common flooring type, plus "missing".
 - Comparable sales (COMP_COLS): prices of the 10 nearest sales that closed before the listing month.
@@ -37,6 +39,8 @@ DISTRICT_COLS = ["ElementaryDistrict", "HighDistrict"]
 # Share of socioeconomically disadvantaged students in the elementary district.
 DISTRICT_NUMERIC_COLS = ["DistrictSEDPct"]
 MLS_DISTRICT_COLS = ["MLSHighSchoolDistrict"]
+
+RATIO_COLS = ["BedBathRatio", "SqftPerBedroom", "LogLotToLivingArea"]
 
 HOA_COLS = ["HOAFeeMonthly", "HasHOA", "HOAFeeMissing"]
 # Fees are quoted per period; a blank frequency is taken as monthly.
@@ -134,6 +138,17 @@ def add_listing_date(df: pd.DataFrame, listing_dates: pd.DataFrame) -> pd.DataFr
     out[LISTING_DATE] = out[LISTING_DATE].where(plausible)
     out["MonthsToClose"] = months_to_close.where(plausible)
     return out
+
+
+def add_ratios(df: pd.DataFrame) -> pd.DataFrame:
+    """RATIO_COLS, as in the team's unified script. NaN when a denominator is missing or 0 or less."""
+    def ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+        return numerator / denominator.where(denominator > 0)
+
+    lot_to_living = ratio(df["LotSizeSquareFeet"], df["LivingArea"])
+    return df.assign(BedBathRatio=ratio(df["BedroomsTotal"], df["BathroomsTotalInteger"]),
+                     SqftPerBedroom=ratio(df["LivingArea"], df["BedroomsTotal"]),
+                     LogLotToLivingArea=np.log(lot_to_living.where(lot_to_living > 0)))
 
 
 def add_hoa(df: pd.DataFrame) -> pd.DataFrame:
@@ -285,13 +300,13 @@ def find_comparables(sales: pd.DataFrame, home: pd.DataFrame, k: int = COMP_K,
 
 
 def comparable_features(comps: pd.DataFrame, living_area: float) -> dict[str, float]:
-    """COMP_COLS for one home from its comparables (the output of find_comparables)."""
+    """COMP_COLS and COMP_PRICE_COLS for one home from its comparables (the output of find_comparables)."""
     if comps.empty:
-        return dict.fromkeys(COMP_COLS, np.nan)
+        return dict.fromkeys(COMP_COLS + COMP_PRICE_COLS, np.nan)
     ppsf = comps["PricePerSqft"].median()
     area = living_area if living_area and living_area > 0 else np.nan
     return {"LogCompPricePerSqft": np.log(ppsf), "LogCompImpliedPrice": np.log(ppsf * area),
-            "CompDistanceKm": comps["DistanceKm"].mean()}
+            "CompDistanceKm": comps["DistanceKm"].mean(), "LogCompMedianPrice": np.log(comps["ClosePrice"].median())}
 
 
 def build_table() -> pd.DataFrame:
@@ -299,5 +314,5 @@ def build_table() -> pd.DataFrame:
     df = load_clean(DATASET_A_PATH)
     df = add_school_districts(df, load_school_districts(DISTRICTS_PATH))
     df = add_listing_date(df, load_listing_details(FILTERED_PATH))
-    df = add_mls_district(add_flooring(add_hoa(df)))
+    df = add_mls_district(add_flooring(add_hoa(add_ratios(df))))
     return add_similar_sales(add_comparable_sales(df))

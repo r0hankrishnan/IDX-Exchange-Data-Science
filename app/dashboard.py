@@ -20,10 +20,10 @@ import shap
 import streamlit as st
 from sklearn.compose import TransformedTargetRegressor
 
-from idx_exchange_data_science import features as ft
+from idx_exchange_data_science import cleaning, features as ft
 from idx_exchange_data_science import serving
 from idx_exchange_data_science.cleaning import DATE_COL, TARGET
-from idx_exchange_data_science.paths import DISTRICTS_PATH, FILTERED_PATH
+from idx_exchange_data_science.paths import APP_TABLE_PATH, DATASET_A_PATH, DISTRICTS_PATH, FILTERED_PATH
 
 ICON = Path(__file__).parent / "assets" / "icon.svg"
 MAX_RESULTS = 10
@@ -36,6 +36,7 @@ LABELS = {
     "LivingArea": "Living area", "PropertyAge": "Age", "LotSizeSquareFeet": "Lot size",
     "DistrictSEDPct": "District disadvantaged share", "LogCompPricePerSqft": "Nearby $ per sq ft",
     "LogCompImpliedPrice": "Comparable-sales price", "CompDistanceKm": "Distance to comparables",
+    "LogCompMedianPrice": "Nearby median sale price",
     "BedroomsTotal": "Bedrooms", "BathroomsTotalInteger": "Bathrooms", "GarageSpaces": "Garage spaces",
     "ParkingTotal": "Parking spaces", "AttachedGarageYN": "Attached garage", "FireplaceYN": "Fireplace",
     "NewConstructionYN": "New construction", "PoolPrivateYN": "Pool", "ViewYN": "View",
@@ -51,51 +52,82 @@ FLAGS = {"PoolPrivateYN": "Pool", "ViewYN": "View", "FireplaceYN": "Fireplace",
 FLAG_VALUES = {"Yes": 1.0, "No": 0.0, "Unknown": np.nan}
 COUNTS = ["LivingArea", "LotSizeSquareFeet", "BedroomsTotal", "BathroomsTotalInteger", "GarageSpaces", "ParkingTotal"]
 
+# Design tokens. Every margin, padding and gap uses the spacing scale; every corner uses one of the two radii.
 CSS = f"""<style>
-.block-container {{max-width: 1180px; padding-top: 2.2rem; padding-bottom: 4rem;}}
+:root {{
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+  --radius: 12px; --radius-sm: 8px;
+  --text-xs: .75rem; --text-sm: .875rem; --text-md: 1rem; --text-lg: 1.125rem;
+  --text-xl: 1.5rem; --text-2xl: 2rem; --text-3xl: 2.5rem;
+}}
+.block-container {{max-width: 1180px; padding: var(--s6) var(--s5) var(--s7);}}
 .st-key-brand button {{padding: 0; min-height: 0;}}
-.st-key-brand button p {{font-size: 1.02rem; letter-spacing: -0.01em;}}
+.st-key-brand button p {{font-size: var(--text-md); letter-spacing: -0.01em;}}
 .st-key-brand button:hover p {{color: {P['accent']};}}
-.eyebrow {{font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: {P['muted']}; font-weight: 600;}}
-.home-title {{font-size: 2.1rem; font-weight: 650; letter-spacing: -0.025em; line-height: 1.15; margin: 1.2rem 0 .2rem;}}
-.home-place {{color: {P['muted']}; margin-bottom: 1rem;}}
-.big-number {{font-size: 2.7rem; font-weight: 650; letter-spacing: -0.03em; line-height: 1.1;
-              font-variant-numeric: tabular-nums; margin: .25rem 0 .1rem;}}
-.mid-number {{font-size: 1.6rem; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;}}
+
+/* Cards: Streamlit bordered containers, the popover and the expander all get the same inner padding. */
+.st-key-estimate_card, .st-key-sale_card, .st-key-details_card {{
+  background: {P['surface']}; border-radius: var(--radius); padding: var(--s5); gap: var(--s3);}}
+[data-testid="stPopoverBody"] {{padding: var(--s5);}}
+[data-testid="stExpanderDetails"] {{padding: 0 var(--s5) var(--s5);}}
+[data-testid="stExpander"] summary {{padding: var(--s3) var(--s5);}}
+
+.eyebrow {{font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .08em; color: {P['muted']};
+           font-weight: 600; margin-bottom: var(--s1);}}
+.home-title {{font-size: var(--text-2xl); font-weight: 650; letter-spacing: -0.025em; line-height: 1.15;
+              margin: var(--s5) 0 var(--s1);}}
+.st-key-close_details {{margin-top: var(--s5);}}  /* the same top margin as the title beside it */
+.home-title.sm {{font-size: var(--text-xl); margin-top: var(--s4);}}
+.home-place {{color: {P['muted']}; margin: 0;}}
+.big-number {{font-size: var(--text-3xl); font-weight: 650; letter-spacing: -0.03em; line-height: 1.1;
+              font-variant-numeric: tabular-nums; margin-bottom: var(--s2);}}
+/* Inline help: a small "?" after the text, with the explanation on hover. */
+.tip {{position: relative; display: inline-flex; align-items: center; justify-content: center; width: 16px;
+       height: 16px; margin-left: var(--s1); border: 1px solid {P['muted']}; border-radius: 50%; color: {P['muted']};
+       font-size: 10px; font-weight: 600; line-height: 1; vertical-align: 2px; cursor: help;}}
+.tip:hover::after {{content: attr(data-tip); position: absolute; left: 0; top: calc(100% + var(--s2)); width: 280px;
+       padding: var(--s2) var(--s3); border-radius: var(--radius-sm); background: {P['text']}; color: {P['surface']};
+       font-size: var(--text-xs); font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none;
+       white-space: normal; z-index: 1000;}}
+.mid-number {{font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;}}
+.fact {{margin-bottom: var(--s4);}}
+[data-testid="stPopoverBody"] {{max-width: 420px;}}
 .muted {{color: {P['muted']};}}
-.small {{font-size: .86rem;}}
-.note {{font-size: .82rem; color: {P['muted']}; line-height: 1.45;}}
-.comparison {{margin-top: .9rem; padding-top: .8rem; border-top: 1px solid {P['border']}; font-size: .92rem;}}
-.stat-strip {{display: flex; flex-wrap: wrap; border: 1px solid {P['border']}; border-radius: 14px;
-              background: {P['surface']}; margin: 1rem 0 .4rem;}}
-.stat {{flex: 1 1 120px; padding: 14px 20px; border-left: 1px solid {P['border']};}}
+.small {{font-size: var(--text-sm);}}
+.comparison {{margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid {P['border']};
+              font-size: var(--text-sm);}}
+.stat-strip {{display: flex; flex-wrap: wrap; border: 1px solid {P['border']}; border-radius: var(--radius);
+              background: {P['surface']};}}
+.stat {{flex: 1 1 120px; padding: var(--s4) var(--s5); border-left: 1px solid {P['border']};}}
 .stat:first-child {{border-left: none;}}
-.stat .value {{font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px;}}
-.section-title {{font-size: 1.15rem; font-weight: 600; letter-spacing: -0.01em; margin: 1.8rem 0 .2rem;}}
-.section-sub {{color: {P['muted']}; font-size: .9rem; margin-bottom: .8rem;}}
-.dl-group {{margin-bottom: 1rem;}}
-.dl-row {{display: flex; justify-content: space-between; gap: 16px; padding: 7px 0;
-          border-bottom: 1px solid {P['border']}; font-size: .9rem;}}
-.dl-row:last-child {{border-bottom: none;}}
+.stat .value {{font-size: var(--text-lg); font-weight: 600; font-variant-numeric: tabular-nums;}}
+.section-title {{font-size: var(--text-lg); font-weight: 600; letter-spacing: -0.01em; margin: var(--s5) 0 0;}}
+.section-sub {{color: {P['muted']}; font-size: var(--text-sm); margin: 0;}}
+.dl-group + .dl-group {{margin-top: var(--s5);}}
+.dl-row {{display: flex; justify-content: space-between; gap: var(--s4); padding: var(--s2) 0;
+          border-bottom: 1px solid {P['border']}; font-size: var(--text-sm);}}
+.dl-row:last-child {{border-bottom: none; padding-bottom: 0;}}
 .dl-row span:first-child {{color: {P['muted']};}}
 .dl-row span:last-child {{text-align: right; font-weight: 500;}}
-.st-key-estimate_card, .st-key-sale_card, .st-key-details_card {{background: {P['surface']}; border-radius: 14px;}}
-.st-key-results, .st-key-suggestions {{border: 1px solid {P['border']}; border-radius: 12px; background: {P['surface']}; padding: 6px; gap: 0;}}
-.st-key-suggestions {{margin-top: -6px;}}
-.st-key-results button, .st-key-suggestions button {{width: 100%; padding: 9px 12px; border-radius: 8px;}}
+.st-key-results, .st-key-suggestions {{border: 1px solid {P['border']}; border-radius: var(--radius);
+  background: {P['surface']}; padding: var(--s2); gap: 0;}}
+.st-key-results button, .st-key-suggestions button {{width: 100%; padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);}}
 .st-key-results button:hover, .st-key-suggestions button:hover {{background: {P['subtle']};}}
 .st-key-results button > div, .st-key-results [data-testid="stMarkdownContainer"],
 .st-key-suggestions button > div, .st-key-suggestions [data-testid="stMarkdownContainer"] {{
     justify-content: flex-start; width: 100%; text-align: left;}}
-.landing {{padding: 3rem 0 .5rem;}}
-.landing h1 {{font-size: 2.4rem; font-weight: 650; letter-spacing: -0.03em; line-height: 1.15; margin-bottom: .6rem;}}
-.landing p {{color: {P['muted']}; font-size: 1.05rem; max-width: 640px;}}
-.steps {{display: flex; gap: 14px; margin-top: 2rem;}}
-.step {{flex: 1; border: 1px solid {P['border']}; border-radius: 14px; background: {P['surface']}; padding: 18px 20px;}}
-.step .number {{color: {P['accent']}; font-weight: 600; font-size: .9rem;}}
-.step .title {{font-weight: 600; margin: 4px 0 4px;}}
-.step .body {{color: {P['muted']}; font-size: .9rem; line-height: 1.45;}}
-.footnote {{color: {P['muted']}; font-size: .85rem; margin-top: 1.4rem;}}
+.landing {{padding: var(--s7) 0 0;}}
+.landing h1 {{font-size: var(--text-3xl); font-weight: 650; letter-spacing: -0.03em; line-height: 1.15;
+              margin: 0 0 var(--s3); padding: 0;}}
+.landing p {{color: {P['muted']}; font-size: var(--text-lg); max-width: 640px; margin: 0;}}
+.steps {{display: flex; flex-wrap: wrap; gap: var(--s4); margin-top: var(--s6);}}
+.step {{flex: 1 1 220px; border: 1px solid {P['border']}; border-radius: var(--radius); background: {P['surface']};
+        padding: var(--s5);}}
+.step .number {{color: {P['accent']}; font-weight: 600; font-size: var(--text-sm);}}
+.step .title {{font-weight: 600; margin: var(--s1) 0;}}
+.step .body {{color: {P['muted']}; font-size: var(--text-sm);}}
+.footnote {{color: {P['muted']}; font-size: var(--text-sm); margin-top: var(--s5);}}
 </style>"""
 
 
@@ -125,8 +157,13 @@ def as_int(x):
 
 def feature_label(name: str) -> str:
     if name.startswith("missingindicator_"):
-        return LABELS[name.removeprefix("missingindicator_")] + " unknown"
+        return feature_label(name.removeprefix("missingindicator_")) + " unknown"
     return LABELS.get(name, name)
+
+
+def tip(explanation: str) -> str:
+    """A small inline "?" that shows `explanation` on hover. Use it for detail that most readers can skip."""
+    return f"<span class='tip' data-tip='{html.escape(explanation, quote=True)}'>?</span>"
 
 
 def stat_strip(items: dict[str, str]) -> str:
@@ -144,8 +181,7 @@ def definition_group(title: str, rows: dict[str, str]) -> str:
 
 # --- data and model -------------------------------------------------------------------
 
-@st.cache_resource(show_spinner="Loading 309,000 sales (about 15 seconds, once)...")
-def load_homes() -> pd.DataFrame:
+def build_homes() -> pd.DataFrame:
     """The modeling table plus the address and listing details shown in the app (not model inputs)."""
     df = ft.build_table()
     extra = pd.read_csv(FILTERED_PATH, usecols=["ListingKey", "UnparsedAddress", "ListPrice", "DaysOnMarket"])
@@ -153,6 +189,21 @@ def load_homes() -> pd.DataFrame:
     df["Address"] = df["UnparsedAddress"].fillna("Address unknown").str.strip()
     place = df["Address"] + " " + df["City"].fillna("") + " " + df["PostalCode"].fillna("")
     df["SearchText"] = " " + place.str.lower().str.replace(r"[^a-z0-9]+", " ", regex=True)
+    return df
+
+
+@st.cache_resource(show_spinner="Loading 309,000 sales...")
+def load_homes() -> pd.DataFrame:
+    """build_homes(), saved to disk. It is built again only when a data file or the feature code is newer
+    than the saved copy (about a minute), so a normal start reads the copy in a few seconds."""
+    sources = [DATASET_A_PATH, FILTERED_PATH, DISTRICTS_PATH, Path(ft.__file__), Path(cleaning.__file__)]
+    fresh = APP_TABLE_PATH.exists() and APP_TABLE_PATH.stat().st_mtime > max(p.stat().st_mtime for p in sources)
+    if fresh:
+        df = pd.read_parquet(APP_TABLE_PATH)
+    else:
+        with st.spinner("Building the sales table after a data change (about a minute, once)..."):
+            df = build_homes()
+        df.to_parquet(APP_TABLE_PATH)
     df["CloseMonth"] = df[DATE_COL].dt.to_period("M")
     return df
 
@@ -259,7 +310,7 @@ def suggestions(df: pd.DataFrame, query: str) -> None:
     matches = search(df, query)
     with st.container(key="suggestions"):
         if matches.empty:
-            st.caption("No sold homes match. Try fewer words, or only the street name.")
+            st.caption("No matches. Try only the street name.")
             if st.button("Enter this home's details", icon=":material/edit_note:", type="tertiary",
                          on_click=enter_details):
                 st.rerun()
@@ -403,32 +454,31 @@ def range_band(estimate: float, ranges: dict, level: float, sale: float | None) 
                   f"<div style='position:absolute; left:{x(sale):.2f}%; top:50px; transform:translateX(-50%);"
                   f" font-size:.75rem; font-weight:600; color:{P['warm']}; white-space:nowrap;'>Sold {money(sale)}</div>")
     return (f"<div role='img' aria-label='Price ranges around the estimate' "
-            f"style='position:relative; height:72px; margin:.6rem 8% .3rem;'>{bands}{marks}</div>")
+            f"style='position:relative; height:72px; margin:var(--s2) 8% 0;'>{bands}{marks}</div>")
 
 
 def estimate_card(estimate: float, original: float, ranges: dict, sale: float | None, key: str) -> None:
-    with st.container(border=True, key="estimate_card"):
+    with st.container(border=True, key="estimate_card", height="stretch"):
         st.markdown("<div class='eyebrow'>Estimated value</div>"
                     f"<div class='big-number'>{money(estimate)}</div>", unsafe_allow_html=True)
         if not np.isclose(estimate, original):
-            st.markdown(f"<div class='muted small'>With your changes. {money(original)} for the home as listed.</div>",
+            st.markdown(f"<div class='muted small'>With your changes | as listed: {money(original)}</div>",
                         unsafe_allow_html=True)
         level = st.segmented_control("Range", list(ranges), default=min(ranges), key=f"level_{key}",
                                      format_func=lambda v: f"{v:.0%} range", label_visibility="collapsed")
         level = level or min(ranges)
         lo, hi = (estimate * r for r in ranges[level])
-        st.markdown(f"<div class='mid-number'>{money(lo)} - {money(hi)}</div>"
-                    + range_band(estimate, ranges, level, sale)
-                    + f"<div class='note'>{level:.0%} of the homes that the model had not seen sold inside this "
-                      "range of their estimate (validation months). A wider range is more certain.</div>",
-                    unsafe_allow_html=True)
+        st.markdown(f"<div class='mid-number'>{money(lo)} - {money(hi)}"
+                    + tip(f"{level:.0%} of homes the model had not seen (validation months) sold inside this range "
+                          "of their estimate. A wider range is more certain.") + "</div>", unsafe_allow_html=True)
+        st.markdown(range_band(estimate, ranges, level, sale), unsafe_allow_html=True)
 
 
 def sale_card(home: pd.Series, original: float, bundle: dict) -> None:
     sold, listed = home[TARGET], home["ListPrice"]
     gap = original / sold - 1
     side = "above" if gap > 0 else "below"
-    with st.container(border=True, key="sale_card"):
+    with st.container(border=True, key="sale_card", height="stretch"):
         st.markdown(
             "<div class='eyebrow'>Sale record</div>"
             f"<div class='big-number'>{money(sold)}</div>"
@@ -436,24 +486,27 @@ def sale_card(home: pd.Series, original: float, bundle: dict) -> None:
             + definition_group("", {"List price": money(listed),
                                     "Sold vs list": "-" if pd.isna(listed) else f"{sold / listed - 1:+.1%}",
                                     "Days on market": number(home["DaysOnMarket"])})
-            + f"<div class='comparison'>The estimate is <b>{abs(gap):.1%} {side}</b> the sale price.</div>",
+            + f"<div class='comparison'>Estimate is <b>{abs(gap):.1%} {side}</b> the sale price</div>",
             unsafe_allow_html=True)
         if bundle["train_first"] <= home[DATE_COL] <= bundle["train_last"]:
-            st.markdown("<div class='note'>This sale is in the model's training data, so this gap is not a fair "
-                        "accuracy check. The Model panel shows the validation accuracy.</div>", unsafe_allow_html=True)
+            st.caption("In the training data", help="The model saw this sale when it was trained, so this gap is not "
+                                                     "a fair accuracy check. See Model for the validation accuracy.")
 
 
 def comparables_section(comps: pd.DataFrame, home: pd.Series) -> None:
     st.markdown("<div class='section-title'>Comparable sales</div>", unsafe_allow_html=True)
     if comps.empty:
-        st.markdown("<div class='section-sub'>No comparable sales: the home has no location, or there are too few "
-                    "earlier sales.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-sub'>None found"
+                    + tip("The home has no location, or fewer than 10 sales closed nearby in the 12 months before it "
+                          "was listed.") + "</div>", unsafe_allow_html=True)
         return
     ppsf = comps["PricePerSqft"].median()
-    implied = f", or <b>{money(ppsf * home['LivingArea'])}</b> for {number(home['LivingArea'])} sq ft" \
-        if pd.notna(home["LivingArea"]) else ""
-    st.markdown(f"<div class='section-sub'>The 10 nearest homes that sold in the 12 months before listing. Their median "
-                f"is <b>${ppsf:,.0f} per sq ft</b>{implied}.</div>", unsafe_allow_html=True)
+    implied = f" | <b>{money(ppsf * home['LivingArea'])}</b> for this size" if pd.notna(home["LivingArea"]) else ""
+    st.markdown(f"<div class='section-sub'>10 nearest sales | median <b>${ppsf:,.0f}/sq ft</b>{implied} | "
+                f"median price <b>{money(comps[TARGET].median())}</b>"
+                + tip("Only sales that closed in the 12 months before the listing month count, so the home's own "
+                      "sale and later sales are never used. The model uses the median $ per sq ft (times the living "
+                      "area) and the median sale price.") + "</div>", unsafe_allow_html=True)
     map_col, table_col = st.columns(2, gap="medium")
     with map_col:
         st.plotly_chart(comps_map(comps, home), theme=None, config={"displayModeBar": False, "scrollZoom": True})
@@ -494,6 +547,7 @@ def drivers_section(model, explainer: shap.TreeExplainer, row: pd.DataFrame) -> 
     features = pipeline_of(model)[:-1].transform(row)
     explanation = explainer(features)
     values = pd.Series(explanation.values[0], index=[feature_label(c) for c in features.columns])
+    values = values.groupby(level=0, sort=False).sum()  # SHAP values add up, so merge columns with the same label
     log = is_log_target(model)
     if log:  # contributions are in log price: show each one as a % change
         values, base = np.expm1(values), np.expm1(explanation.base_values[0])
@@ -505,9 +559,9 @@ def drivers_section(model, explainer: shap.TreeExplainer, row: pd.DataFrame) -> 
     data = pd.DataFrame({"feature": shown.index, "effect": shown.values})
     data["direction"] = np.where(data["effect"] >= 0, "Raises the estimate", "Lowers the estimate")
     data["label"] = data["effect"].map(lambda v: f"{v:+.1%}" if log else ("+" if v >= 0 else "-") + money(abs(v)))
-    st.markdown(f"<div class='section-sub'>The model starts from a typical home ({money(base)}). Each feature then "
-                f"moves the estimate {'by a percentage' if log else 'up or down'} (SHAP values).</div>",
-                unsafe_allow_html=True)
+    st.markdown(f"<div class='section-sub'>Change from a typical home ({money(base)})"
+                + tip("The model starts from a typical home. Each bar shows how much one feature moves this estimate "
+                      f"{'by a percentage' if log else 'up or down'} (SHAP values).") + "</div>", unsafe_allow_html=True)
     bars = alt.Chart(data).mark_bar(cornerRadiusEnd=4, height=16).encode(
         y=alt.Y("feature:N", sort=None, title=None,
                 axis=alt.Axis(labelLimit=200, labelPadding=8, ticks=False, domain=False)),
@@ -549,23 +603,27 @@ def model_panel(bundle: dict, df: pd.DataFrame) -> None:
     groups = ["Dataset A"] + [name for name, col in [
         ("school districts", "ElementaryDistrict"), ("MLS district", "MLSHighSchoolDistrict"),
         ("HOA", "HOAFeeMonthly"), ("flooring", "FlooringMissing"), ("comparable sales", "LogCompImpliedPrice"),
+        ("median comparable price", "LogCompMedianPrice"),
     ] if col in inputs]
     v = bundle["validation"]
     months = bundle["validation_months"]
-    st.markdown(f"**{type(pipeline_of(model)[-1]).__name__}**{' on log price' if is_log_target(model) else ''}  \n"
-                f"Features: {', '.join(groups)}.  \n"
-                f"Trained on {bundle['n_train']:,} sales, {bundle['train_first']:%b %Y} to {bundle['train_last']:%b %Y}.")
-    st.markdown(f"<div class='eyebrow' style='margin-top:.8rem'>Validation, {months[0]} to {months[-1]}</div>",
-                unsafe_allow_html=True)
+    facts = {
+        "Model": f"{type(pipeline_of(model)[-1]).__name__}{', log price' if is_log_target(model) else ''}",
+        "Features": ", ".join(groups),
+        "Trained on": f"{bundle['n_train']:,} sales, {bundle['train_first']:%b %Y} to {bundle['train_last']:%b %Y}",
+    }
+    st.markdown("".join(f"<div class='fact'><div class='eyebrow'>{k}</div><div class='small'>{html.escape(v)}</div></div>"
+                        for k, v in facts.items())
+                + f"<div class='eyebrow'>Validation | {months[0]} to {months[-1]}"
+                + tip("Each month is predicted by a model trained only on the months before it. The price ranges come "
+                      "from these errors: the 80% range holds the middle 80% of sale price / estimate ratios.")
+                + "</div>", unsafe_allow_html=True)
     c = st.columns(2)
     c[0].metric("Median error", f"{v['median_ape']:.1%}")
     c[1].metric("Within 10%", f"{v['within_10pct']:.0%}")
     c[0].metric("R²", f"{v['r2']:.3f}")
     c[1].metric("Mean error", f"{v['mape']:.1%}")
-    st.markdown("<div class='note'>Each validation month is predicted by a model trained only on the months before "
-                "it. The price ranges come from these out-of-sample errors: the 80% range holds the middle 80% of the "
-                f"actual / estimated price ratios. Data: {len(df):,} CRMLS single-family sales.</div>",
-                unsafe_allow_html=True)
+    st.caption(f"Data: {len(df):,} CRMLS single-family sales")
 
 
 # --- views ------------------------------------------------------------------------------
@@ -580,15 +638,14 @@ def landing(df: pd.DataFrame) -> None:
     enter_details_link("Not a sold home? Enter its details")
     st.markdown(
         "<div class='landing'><h1>Estimate what a California home will sell for</h1>"
-        "<p>The model prices a single-family home from what is known before it goes on the market: the home itself, "
-        "its location and recent sales nearby.</p></div>"
+        "<p>Priced before listing, from the home, its location and recent sales nearby.</p></div>"
         "<div class='steps'>"
         "<div class='step'><div class='number'>1</div><div class='title'>Find a home</div>"
-        "<div class='body'>Type a street address, city or ZIP code, then pick a home from the suggestions.</div></div>"
-        "<div class='step'><div class='number'>2</div><div class='title'>Check its details</div>"
-        "<div class='body'>The listing details load for you. Open them to review or change any value.</div></div>"
+        "<div class='body'>Search by address, city or ZIP code</div></div>"
+        "<div class='step'><div class='number'>2</div><div class='title'>Check the details</div>"
+        "<div class='body'>Review or edit the listing values</div></div>"
         "<div class='step'><div class='number'>3</div><div class='title'>Read the estimate</div>"
-        "<div class='body'>See the estimated price, how certain it is, the nearby sales and what drives it.</div></div>"
+        "<div class='body'>Price, range, nearby sales and drivers</div></div>"
         "</div>"
         f"<div class='footnote'>{len(df):,} CRMLS single-family sales | {first} to {last}</div>",
         unsafe_allow_html=True)
@@ -597,15 +654,14 @@ def landing(df: pd.DataFrame) -> None:
 def results_view(df: pd.DataFrame, query: str) -> None:
     matches = search(df, query)
     if matches.empty:
-        st.markdown(f"<div class='section-title'>No sold homes match \"{html.escape(query)}\"</div>"
-                    "<div class='section-sub'>Try fewer words, or only the street name. If the home is not in the "
-                    "data, you can enter its details.</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='section-title'>No matches for \"{html.escape(query)}\"</div>"
+                    "<div class='section-sub'>Try only the street name</div>", unsafe_allow_html=True)
         enter_details_link()
         return
     shown = matches.head(MAX_RESULTS)
-    more = f", showing the {MAX_RESULTS} most recent" if len(matches) > MAX_RESULTS else ""
-    st.markdown(f"<div class='section-title'>{len(matches):,} homes match \"{html.escape(query)}\"</div>"
-                f"<div class='section-sub'>Select a home{more}.</div>", unsafe_allow_html=True)
+    more = f"<div class='section-sub'>Showing the {MAX_RESULTS} most recent</div>" if len(matches) > MAX_RESULTS else ""
+    st.markdown(f"<div class='section-title'>{len(matches):,} homes match \"{html.escape(query)}\"</div>{more}",
+                unsafe_allow_html=True)
     with st.container(key="results"):
         for index, match in shown.iterrows():
             if st.button(f"**{match['Address']}**  |  {text(match['City'])} {text(match['PostalCode'])}  |  "
@@ -620,13 +676,14 @@ def home_view(df: pd.DataFrame, index, bundle: dict, explainer) -> None:
     model, inputs = bundle["model"], serving.input_columns(bundle["model"])
     year_base = home[DATE_COL].year
     if st.session_state.pop("loaded", None):
-        st.toast(f"Listing details loaded for {home['Address']}", icon=":material/check_circle:")
+        st.toast(f"Loaded {home['Address']}", icon=":material/check_circle:")
     place = ", ".join([text(home["City"]), f"{text(home['CountyOrParish'])} County", text(home["PostalCode"])])
     st.markdown(f"<div class='home-title'>{html.escape(home['Address'])}</div>"
                 f"<div class='home-place'>{html.escape(place)}</div>", unsafe_allow_html=True)
     defaults = defaults_from(home, year_base)
-    with st.expander("Listing details loaded. Review or adjust them.", icon=":material/check_circle:"):
-        st.caption("These are the values the model uses. Change any of them to see a new estimate. Blank means unknown.")
+    with st.expander("Adjust the home details", icon=":material/tune:"):
+        st.caption("Blank means unknown", help="These are the values the model uses. Change any of them to see a "
+                                                "new estimate.")
         values = details_form(f"edit_{index}", defaults, inputs)
     base = df.loc[[index]]
     row = apply_details(base, values, defaults, year_base)
@@ -652,11 +709,12 @@ def home_view(df: pd.DataFrame, index, bundle: dict, explainer) -> None:
 
 def manual_view(df: pd.DataFrame, bundle: dict, explainer) -> None:
     model, inputs = bundle["model"], serving.input_columns(bundle["model"])
-    title, close = st.columns([6, 1], vertical_alignment="bottom")
+    title, close = st.columns([6, 1], vertical_alignment="center")
     title.markdown("<div class='home-title'>Enter a home's details</div>", unsafe_allow_html=True)
     close.button("Close", icon=":material/close:", key="close_details", width="stretch", on_click=close_details)
-    st.markdown("<div class='home-place'>For a home that is not in the data. The model places the home at the center "
-                "of its ZIP code to find its school districts and nearby sales.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='home-place'>For a home that is not in the data"
+                + tip("The home is placed at the center of its ZIP code to find its school districts and nearby "
+                      "sales. Blank fields mean unknown.") + "</div>", unsafe_allow_html=True)
     zips = df.groupby("PostalCode")["City"].agg(lambda c: c.mode().iat[0] if c.notna().any() else "")
     blank = {**dict.fromkeys(COUNTS + ["YearBuilt", "HOAFeeMonthly"]), **dict.fromkeys(FLAGS, "Unknown"), "Flooring": []}
     with st.container(border=True, key="details_card"):
@@ -673,8 +731,8 @@ def manual_view(df: pd.DataFrame, bundle: dict, explainer) -> None:
     row = apply_details(base, values, blank, base[ft.LISTING_DATE].iat[0].year)
     home = row.iloc[0]
     estimate = float(model.predict(row)[0])
-    st.markdown(f"<div class='home-title' style='font-size:1.5rem'>{html.escape(home['Address'])}</div>"
-                f"<div class='home-place'>Estimated as if listed in {home[ft.LISTING_DATE]:%B %Y}</div>",
+    st.markdown(f"<div class='home-title sm'>{html.escape(home['Address'])}</div>"
+                f"<div class='home-place'>As if listed in {home[ft.LISTING_DATE]:%B %Y}</div>",
                 unsafe_allow_html=True)
     left, right = st.columns([3, 2], gap="medium")
     with left:

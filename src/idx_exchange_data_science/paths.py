@@ -11,6 +11,7 @@ FILTERED_PATH = DATA_DIR / "intermediate" / "CRMLSSoldFiltered.csv"  # input to 
 DATASET_A_PATH = DATA_DIR / "processed" / "CRMLSSoldDatasetA.csv"  # written by 02b_preprocessing_dataset_a
 DISTRICTS_PATH = DATA_DIR / "external" / "school_districts_2425" / "DistrictAreas2425.shp"
 MODELS_DIR = DATA_DIR / "models"
+APP_TABLE_PATH = DATA_DIR / "processed" / "app_table.parquet"  # the app's cached build_table(), rebuilt when stale
 
 RESULTS_DIR = PROJECT_ROOT / "results"  # weekly deliverable tables
 ARCHIVE_DIR = RESULTS_DIR / "archive"  # supporting tables: per-month backtests, side experiments

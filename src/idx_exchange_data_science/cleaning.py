@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 TARGET = "ClosePrice"
@@ -24,16 +25,21 @@ ID_COL = "ListingKey"
 
 MAX_MISSING_SHARE = 0.8
 
-# Values outside these inclusive ranges become NaN and are imputed later.
+SQFT_PER_ACRE = 43_560
+
+# Values outside these inclusive ranges become NaN and are imputed later (the team's unified clean_source).
 VALID_RANGES = {
+    "LivingArea": (300, 15_000),
+    "YearBuilt": (1850, 2027),
     "BedroomsTotal": (1, 20),
     "BathroomsTotalInteger": (1, 20),
+    "LotSizeSquareFeet": (100, 100 * SQFT_PER_ACRE),
     "GarageSpaces": (0, 20),
-    "ParkingTotal": (0, 20),
-    "Latitude": (32.5, 42.1),
-    "Longitude": (-124.5, -114.0),
+    "ParkingTotal": (0, 30),
 }
-SQFT_PER_ACRE = 43_560
+# A coordinate outside these bounds makes the whole pair missing.
+CA_BOUNDS = {"Latitude": (32.4, 42.1), "Longitude": (-124.5, -114.1)}
+BOOLEAN_VALUES = {True: 1.0, False: 0.0, "True": 1.0, "False": 0.0, "Yes": 1.0, "No": 0.0, "Y": 1.0, "N": 0.0}
 
 MEDIAN_COLS = ["LivingArea", "PropertyAge", "LotSizeSquareFeet"]
 MODE_COLS = ["BedroomsTotal", "BathroomsTotalInteger", "GarageSpaces", "ParkingTotal"]
@@ -82,6 +88,16 @@ def normalize_address(address: pd.Series) -> pd.Series:
     return normalized.where(normalized.str.contains(r"\d", na=False))
 
 
+def drop_duplicate_listings(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per ListingKey: the record with the latest CloseDate.
+
+    Overlapping monthly files can hold the same listing twice with different close dates (a corrected
+    record). Without this step, an earlier copy can be in training and the later copy in validation.
+    """
+    latest = df.sort_values("CloseDate", kind="stable", na_position="first").duplicated(ID_COL, keep="last")
+    return df[~latest.reindex(df.index)]
+
+
 def drop_duplicate_sales(df: pd.DataFrame) -> pd.DataFrame:
     """Same address and close date = same sale; keep the first. Rows without a valid address are dropped."""
     address = normalize_address(df["UnparsedAddress"])
@@ -94,19 +110,29 @@ def drop_nonpositive_living_area(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fix_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardize formats, null out implausible values, and derive PropertyAge."""
+    """Standardize formats, null out implausible values, and derive PropertyAge (as in the team's clean_source)."""
     out = df.copy()
-    out["PostalCode"] = out["PostalCode"].astype("string").str.extract(r"^(\d{5})", expand=False)
     for col, (low, high) in VALID_RANGES.items():
         out[col] = out[col].where(out[col].between(low, high))
+
+    out["PostalCode"] = out["PostalCode"].astype("string").str.strip().str.extract(r"^(\d{5})", expand=False)
+    for col in ("City", "CountyOrParish"):
+        text = out[col].astype("string").str.strip()
+        out[col] = text.mask(text == "")
+
+    outside = pd.Series(False, index=out.index)
+    for col, (low, high) in CA_BOUNDS.items():
+        outside |= out[col].notna() & ~out[col].between(low, high)
+    out.loc[outside, GEO_COLS] = np.nan
 
     lot_sqft = out["LotSizeSquareFeet"].where(out["LotSizeSquareFeet"] > 0)
     lot_from_acres = out["LotSizeAcres"].where(out["LotSizeAcres"] > 0) * SQFT_PER_ACRE
     out["LotSizeSquareFeet"] = lot_sqft.fillna(lot_from_acres)
 
-    out["PropertyAge"] = out["CloseDate"].dt.year - out["YearBuilt"]
     for col in BINARY_COLS:
-        out[col] = out[col].map({True: 1.0, False: 0.0, "True": 1.0, "False": 0.0})
+        out[col] = out[col].map(BOOLEAN_VALUES)
+    age = out["CloseDate"].dt.year - out["YearBuilt"]
+    out["PropertyAge"] = age.where(age >= 0)
     return out
 
 
@@ -127,6 +153,7 @@ CLEANING_STEPS: list[Callable[[pd.DataFrame], pd.DataFrame]] = [
     parse_dates,
     drop_invalid_prices,
     drop_closed_before_listed,
+    drop_duplicate_listings,
     drop_duplicate_sales,
     drop_nonpositive_living_area,
     fix_fields,

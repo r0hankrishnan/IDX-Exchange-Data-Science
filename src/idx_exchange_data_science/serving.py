@@ -28,13 +28,14 @@ TRAIN_MONTHS = 18
 N_VALIDATION_MONTHS = 6
 # Price ranges: the central 80%, 90% and 95% of validation homes' actual / predicted ratios.
 RANGE_LEVELS = (0.80, 0.90, 0.95)
-NUMERIC = ft.DISTRICT_NUMERIC_COLS + ft.HOA_COLS + ft.FLOORING_COLS + ft.COMP_COLS
+NUMERIC = ft.DISTRICT_NUMERIC_COLS + ft.HOA_COLS + ft.FLOORING_COLS + ft.COMP_COLS + ft.COMP_PRICE_COLS
 CATEGORICAL = ft.DISTRICT_COLS
 
 
 def final_model() -> BaseEstimator:
-    """The best candidate in 07_final_model_selection (lowest validation MdAPE, 7.23%): XGBoost with the
-    settings tuned in 06, on Dataset A + school districts + HOA + flooring + comparable sales, fit on log price."""
+    """Model C, the best single model in 07_final_model_selection (validation MdAPE 7.02%, lower than the earlier
+    served model in 6 of 6 months): XGBoost with the settings tuned in 06, on Dataset A + school districts + HOA +
+    flooring + comparable sales + their median sale price, fit on log price."""
     return build_model(tuned_xgboost(), make_preprocessor(NUMERIC, CATEGORICAL), log_target=True)
 
 
