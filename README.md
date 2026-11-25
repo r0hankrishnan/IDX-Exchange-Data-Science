@@ -1,230 +1,147 @@
 # IDX Exchange Data Science
 
-This project predicts the sale price (`ClosePrice`) of a California single-family home. The prediction is made
-before the home goes on the market. Thus, the model uses only data that is known before the listing date.
+This project predicts the sale price (`ClosePrice`) of a California single-family home before the home goes on the
+market. The model uses only data that is known before the listing date.
 
-## Dataset source
+## Data
 
-The data comes from CRMLS (California Regional Multiple Listing Service). The IDX Exchange program supplied it as
-monthly files of closed sales, from January 2024 to April 2026.
+The data is CRMLS (California Regional Multiple Listing Service) closed sales from January 2024 to April 2026. The
+IDX Exchange program supplied it as monthly files.
 
 | Stage | Rows | File |
 |---|---|---|
-| Monthly exports, all property types | 615,707 | `data/raw/` (28 files), combined in `data/intermediate/CRMLSSoldCombined.csv` |
-| Residential, single-family homes | 309,735 | `data/intermediate/CRMLSSoldFiltered.csv` |
-| Dataset A (after the team cleaning rules) | 309,019 | `data/processed/CRMLSSoldDatasetA.csv` |
+| Monthly exports, all property types | 615,707 | `data/raw/` (28 files) |
+| California single-family homes | 309,735 | `data/intermediate/CRMLSSoldFiltered.csv` |
+| Dataset A (after the team cleaning rules) | 308,786 | `data/processed/CRMLSSoldDatasetA.csv` |
 
-Two external sources add features:
-
-- **School districts:** [California School District Areas 2024-25](https://data.ca.gov/dataset/california-school-district-areas-2024-25)
-  (California Department of Education, shapefile).
-- **Listing details:** the listing date, HOA fee, flooring and MLS school district come from the filtered CRMLS file.
-
-The `data/` folder is not in git. Each user must get a copy of the data files.
+The school district boundaries come from
+[California School District Areas 2024-25](https://data.ca.gov/dataset/california-school-district-areas-2024-25).
+The `data/` folder is not in git, so each user must get a copy of the data files.
 
 ## Preprocessing
 
-Preprocessing has two parts. The team agreed on the rules in `preprocessing-procedures.md`.
+**Fixed cleaning rules** (`cleaning.py`) look at one row at a time, so they run one time on the full data. They follow
+the team's `clean_source` (`docs/team/`) and `preprocessing-procedures.md`:
 
-**1. Fixed cleaning rules (Dataset A).** These rules examine one row at a time. They learn nothing from the data.
-Thus, they run one time on the full dataset, before the split.
+- Keep California single-family homes with a positive `ClosePrice` that did not close before the listing date.
+- Keep one row for each `ListingKey`. Also remove duplicate sales (same address and close date), rows without a valid
+  address and rows with a living area of 0 or less.
+- Set values outside the valid ranges to missing. Calculate the lot size from acres and `PropertyAge` from `YearBuilt`.
 
-- Keep California, Residential, single-family homes.
-- Remove rows with a missing or zero `ClosePrice`.
-- Remove rows that closed before the listing date.
-- Remove duplicate sales (same normalized address and close date). Remove rows without a valid address.
-- Remove rows with a living area of zero or less.
-- Set values outside a valid range to missing (for example, more than 20 bedrooms, or coordinates outside California).
-- Calculate the lot size from acres when the square-foot value is missing. Calculate `PropertyAge` from `YearBuilt`.
+**Fitted steps** (`splits.py`, `preprocessing.py`) learn values from data, so they use the training months only:
 
-**2. Fitted preprocessing.** These steps learn values from data. Thus, they are fit on the training rows only,
-inside each model pipeline (scikit-learn `ColumnTransformer`).
+- Remove the top and bottom 0.5% of `ClosePrice`.
+- Fill missing numbers with the median or the mode. Add a missing flag for each continuous field, yes/no field and
+  coordinate. Fill missing coordinates from the ZIP code, then the county.
+- Encode city, county, ZIP code and school district with cross-fitted target encoding.
 
-- Remove the top and bottom 0.5% of `ClosePrice`. The limits come from the training window.
-- Fill missing numbers with the training median or mode. Add a flag for each missing yes/no value.
-- Fill missing coordinates with the median of the same ZIP code, then the county, then all homes.
-- Replace each city, county, ZIP code and school district with its mean training price (cross-fitted target
-  encoding).
+## Features
 
-**Features added to Dataset A** (`features.build_table()`):
+`features.build_table()` adds these groups to Dataset A:
 
-| Group | Columns | Source |
-|---|---|---|
-| School districts | Elementary district, high school district, share of disadvantaged students | Spatial join of the coordinates to the district boundaries |
-| HOA | Monthly HOA fee, HOA yes/no, fee missing yes/no | `AssociationFee`, `AssociationFeeFrequency` |
-| Flooring | Wood, tile, carpet, laminate, vinyl, "see remarks", flooring missing | `Flooring` |
-| Comparable sales | Median price per square foot of the 10 nearest sales, that price times the living area, mean distance | Sales that closed in the 12 months before the listing month |
+| Group | Columns |
+|---|---|
+| School districts | Elementary and high school district, and the share of disadvantaged students (spatial join of the coordinates) |
+| HOA | Monthly fee, HOA yes/no, fee missing |
+| Flooring | Wood, tile, carpet, laminate, vinyl, "see remarks", flooring missing |
+| Comparable sales | The 10 nearest sales that closed in the 12 months before the listing month: their median price per square foot, that value times the living area, their mean distance and their median sale price (Model C) |
 
-## Evaluation method
+## Evaluation
 
-- **Time-based splits.** For each month, the model trains on the 18 months before that month.
-- **Validation months:** 2025-10 to 2026-03. All decisions about models, features and settings use these 6 months.
-- **Test month:** 2026-04. We score the test month one time, for the final model only.
-- **Decision metric:** the median absolute percentage error (MdAPE). The goal is an accurate estimate for a typical
-  home. R² and the dollar error give the most weight to expensive homes. MdAPE gives the same weight to each home.
-  (Notebooks `03` to `06` used R² to make decisions.)
-- **Decision rule:** a change is accepted if the mean validation MdAPE decreases and the MdAPE is lower in at least
-  5 of the 6 months.
-- **Other metrics:** R², the mean absolute error (MAE) in dollars, and the share of homes with a prediction within
-  10% of the sale price.
+- Each validation month (2025-10 to 2026-03) uses a model trained on the 18 months before it.
+- The test month (2026-04) is scored only after the model is selected.
+- The decision metric is the median absolute percentage error (MdAPE), because it shows the error for a typical home.
+  A change is accepted if it decreases the mean MdAPE and decreases the MdAPE in at least 5 of the 6 months.
+- We also report R², the mean absolute error (MAE) and the share of homes within 10% of the sale price.
 
-## Models tested
+## Results
 
-All values are means over the 6 validation months.
+Means over the 6 validation months:
 
-| Model | Features | MdAPE | R² | MAE | Within 10% |
-|---|---|---|---|---|---|
-| Linear regression (log price, log sizes) | Dataset A | 11.96% | 0.8007 | $207.0K | 42.9% |
-| Decision tree | Dataset A | 9.39% | 0.8508 | $182.4K | 52.3% |
-| Random forest | Dataset A | 7.85% | 0.8897 | $153.3K | 59.0% |
-| Random forest | + school districts | 7.74% | 0.8923 | $151.2K | 59.7% |
-| Random forest | + school districts + comparable sales | 7.86% | 0.8989 | $149.8K | 59.3% |
-| Random forest, log price | + school districts + HOA + flooring | 7.53% | 0.8896 | $148.4K | 60.8% |
-| XGBoost | + school districts + comparable sales | 7.73% | 0.9083 | $143.8K | 60.1% |
-| XGBoost | + school districts + HOA + flooring + comparable sales | 7.57% | 0.9122 | $140.2K | 61.0% |
-| **XGBoost, log price** | **+ school districts + HOA + flooring + comparable sales** | **7.23%** | **0.9132** | **$136.0K** | **62.7%** |
+| Model | MdAPE | R² | MAE | Within 10% |
+|---|---|---|---|---|
+| Linear regression, log price (notebook `03`) | 11.96% | 0.8007 | $207.0K | 42.9% |
+| Random forest + school districts + comparable sales, dollar price | 7.85% | 0.8994 | $149.7K | 59.3% |
+| XGBoost + school districts + HOA + flooring + comparable sales, log price | 7.21% | 0.9133 | $136.0K | 62.8% |
+| **Model C: the same + median comparable price (served)** | **7.02%** | **0.9144** | **$133.8K** | **63.6%** |
 
-Other tests:
+- Model C is better than the model above it in all 6 validation months. The app uses Model C (from 2026-11-25).
+- The test month (2026-04, 12,309 sales) was scored one time, for the earlier model: MdAPE 7.32%, R² 0.9129, MAE
+  $144.0K, 62.1% within 10%. Its 80%, 90% and 95% price ranges contained 78.2%, 89.2% and 94.7% of the sale prices.
+- Model C was made after that score. Its test-month MdAPE is 7.17% (R² 0.9165), but this is a second look at the
+  test month, so the selection uses the validation months only.
+- The linear regression row comes from the data before the Dataset A fix of 2026-11-22. All other rows use the fixed
+  data (notebook `07`).
 
-- **Features that did not help:** room ratios, ZIP listing supply, listing month and size tiers.
-- **Other models:** LightGBM, CatBoost and Kumo Tabular (a pretrained model from NVIDIA). We tested them on one
-  validation month only, in notebook `06`.
-- **Team settings:** the team's XGBoost settings, from the team's saved model, were 0.0005 to 0.0017 R² lower than
-  our settings for every feature set.
+`docs/findings.md` gives the details of each experiment, including the features and models that did not help.
 
-`docs/findings.md` gives the details of each experiment.
-
-## Best result
-
-The best model is **XGBoost on Dataset A + school districts + HOA + flooring + comparable sales, fit on log price**
-(notebook `07_final_model_selection`, 30 candidates, selected by MdAPE).
-
-- The median home has a 7.23% error (MdAPE). 62.7% of homes are within 10% of the sale price.
-- Validation R² is 0.9132, and MAE is $136.0K.
-- Against the random forest from week 6, MdAPE is 0.63 points lower, and the model is better in all 6 months.
-
-**Test month (2026-04, scored one time after the selection, notebook `08_test_month`):**
-
-| Metric | Validation (mean of 6 months) | Test (2026-04, 12,309 sales) |
-|---|---|---|
-| MdAPE | 7.23% | 7.40% |
-| R² | 0.9132 | 0.9152 |
-| MAE | $136.0K | $143.9K |
-| Within 10% | 62.7% | 62.1% |
-
-The 80%, 90% and 95% price ranges contained 78.1%, 89.1% and 94.6% of the test sale prices.
-
-## How to run the code again
+## How to run the code
 
 Use [uv](https://docs.astral.sh/uv/). The file `uv.lock` pins the Python version and all packages.
 
-1. Install the packages:
+1. Install the packages and run the tests (the tests do not need the data files):
 
    ```bash
    uv sync
-   ```
-
-2. Run the tests. The tests use small synthetic data, so they do not need the data files.
-
-   ```bash
    uv run pytest
    ```
 
-3. Put the data files in these locations (`src/idx_exchange_data_science/paths.py` lists all paths):
+2. Put the data files in these locations (`src/idx_exchange_data_science/paths.py` lists all paths):
    - `data/intermediate/CRMLSSoldFiltered.csv`
-   - `data/external/school_districts_2425/DistrictAreas2425.shp` (unzip the download from the link above)
+   - `data/external/school_districts_2425/DistrictAreas2425.shp`
 
-4. Make Dataset A:
-
-   ```bash
-   uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace notebooks/02b_preprocessing_dataset_a.ipynb
-   ```
-
-5. Run the model notebooks. Each notebook writes its results table to `results/`.
+3. Make Dataset A, then run the model notebooks. Each notebook writes its results table to `results/`.
 
    ```bash
-   for nb in 03_baseline_model 04_model_comparison 05_feature_engineering 06_advanced_models 07_final_model_selection; do
+   for nb in 02b_preprocessing_dataset_a 03_baseline_model 04_model_comparison 05_feature_engineering 06_advanced_models 07_final_model_selection; do
      uv run --with nbconvert jupyter nbconvert --to notebook --execute --inplace notebooks/$nb.ipynb
    done
    ```
 
-   Notebook `04` needs approximately 8 minutes. Notebook `07` needs approximately 13 minutes. Notebook `06` needs a
-   GPU for Kumo Tabular.
+   Notebook `04` needs approximately 8 minutes and notebook `07` approximately 13 minutes. Notebook `06` needs a GPU.
+   Run `08_test_month` only for a final model, because the test month is scored one time.
 
-| Notebook | Question | Results table |
-|---|---|---|
-| `01_exploration` | What does the data contain? | none |
-| `02_preprocessing` | Individual week 3 preprocessing | `data/processed/CRMLSSoldCleaned.csv` |
-| `02b_preprocessing_dataset_a` | Team preprocessing (Dataset A) | `data/processed/CRMLSSoldDatasetA.csv` |
-| `03_baseline_model` | Linear regression baseline | `results/baseline_results.csv` |
-| `04_model_comparison` | Linear model, tree or forest, and the training window length | `results/model_comparison.csv` |
-| `05_feature_engineering` | Room ratios and school districts | `results/feature_comparison.csv` |
-| `06_advanced_models` | Gradient boosting and a pretrained tabular model | `results/advanced_models_comparison.csv` |
-| `07_final_model_selection` | Which feature set and model is best | `results/final_model_selection.csv` |
-| `08_test_month` | Score the selected model one time on the test month | `results/test_month.csv` |
+| Notebook | Question |
+|---|---|
+| `01_exploration` | What does the data contain? |
+| `02_preprocessing`, `02b_preprocessing_dataset_a` | Individual and team preprocessing (Dataset A) |
+| `03_baseline_model` | Linear regression baseline |
+| `04_model_comparison` | Linear model, tree or forest, and the training window length |
+| `05_feature_engineering` | Room ratios and school districts |
+| `06_advanced_models` | Gradient boosting and a pretrained tabular model |
+| `07_final_model_selection` | Which feature set and model is best |
+| `08_test_month` | The score of the selected model on the test month |
 
-The folder `notebooks/experiments/` contains side experiments. Their tables, and the month-by-month results of all
-notebooks, are in `results/archive/`.
+Side experiments are in `notebooks/experiments/`. Their tables are in `results/archive/`.
 
 ## How to start the app
 
-1. Train the final model and save it to `data/models/final_model.joblib` (approximately 30 seconds):
+```bash
+uv run python -m idx_exchange_data_science.serving   # train and save the final model (approximately 30 seconds)
+uv run streamlit run app/dashboard.py
+```
 
-   ```bash
-   uv run python -m idx_exchange_data_science.serving
-   ```
+Then open the URL that Streamlit shows (usually http://localhost:8501). Search for an address, city or ZIP code, or
+select **Enter details** to enter a home. For each home, the app shows:
 
-2. Start the app:
-
-   ```bash
-   uv run streamlit run app/dashboard.py
-   ```
-
-3. Open the URL that Streamlit shows (usually http://localhost:8501).
-
-Use the app in one of two ways:
-
-- **Search:** type part of an address, city or ZIP code in the search bar. Then select a home from the list.
-- **Enter details:** select **Enter details**, then enter a ZIP code and the details of a home.
-
-For each home, the app shows:
-
-- The estimate, with 80%, 90% and 95% price ranges.
-- The sale record (for a home in the data).
-- The comparable sales, on a map and in a table.
+- The estimate, with 80%, 90% and 95% price ranges. A range contains the stated share of the validation sale prices.
+- The sale record and the comparable sales, on a map and in a table.
 - The features that had the most effect on the estimate.
 
-To see a new estimate, open **Adjust the home details** and change a value. Select **Model** to see the model
-details and the validation accuracy.
-
-**Price ranges:** the ranges are not bootstrap intervals. The final model predicts each validation month with
-training data from earlier months only. The 80% range contains the middle 80% of the ratios of sale price to
-estimate. Thus, 80% of the homes that the model had not seen sold inside their 80% range.
-
-The app uses the model that `serving.final_model()` defines: the best model from the table above (XGBoost on Dataset A + school districts + HOA + flooring + comparable sales, fit on log price). The model is trained on the latest 18 months of data (November 2024 to April 2026).
+The app uses Model C, trained on the latest 18 months (November 2024 to April 2026). The first start after a data
+change builds the sales table (approximately 30 seconds) and saves it to `data/processed/app_table.parquet`. Later
+starts read the saved table in less than 1 second.
 
 ## Code structure
 
-The package `src/idx_exchange_data_science/` contains all shared code. The modules are in the order of the data
-flow:
+The package `src/idx_exchange_data_science/` contains all shared code, in the order of the data flow:
 
 | Module | Purpose |
 |---|---|
-| `paths` | Gives the location of the data, results and model files |
-| `cleaning` | Applies the Dataset A cleaning rules |
-| `features` | Adds the feature groups (`build_table()`) |
-| `splits` | Makes the time-based training and evaluation splits |
-| `preprocessing` | Makes the fitted preprocessing step (`make_preprocessor()`) |
-| `modeling` | Builds models, runs the validation backtest, and calculates the metrics |
+| `paths` | The location of the data, results and model files |
+| `cleaning` | The Dataset A cleaning rules |
+| `features` | The feature groups (`build_table()`) |
+| `splits` | The time-based training and evaluation splits |
+| `preprocessing` | The fitted preprocessing step (`make_preprocessor()`) |
+| `modeling` | The models, the validation backtest and the metrics |
 | `serving` | Trains, saves and loads the final model |
-
-Example:
-
-```python
-from idx_exchange_data_science import backtest, build_model, build_table, make_preprocessor, tuned_xgboost, validation_months
-from idx_exchange_data_science import features as ft
-
-df = build_table()
-model = build_model(tuned_xgboost(), make_preprocessor(numeric=ft.COMP_COLS, categorical=ft.DISTRICT_COLS))
-scores, predictions = backtest({"xgboost": model}, df, validation_months("2026-04", 6), train_months=18)
-```
