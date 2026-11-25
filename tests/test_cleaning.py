@@ -60,6 +60,17 @@ def test_same_address_different_date_is_kept():
     assert len(cl.clean(rows)) == 2
 
 
+def test_same_listing_twice_keeps_the_latest_close():
+    rows = raw_rows(ListingKey=[7, 7], CloseDate=["2024-05-01", "2024-03-01"], ClosePrice=[510_000.0, 500_000.0])
+    out = cl.clean(rows)
+    assert len(out) == 1 and out["ClosePrice"].iloc[0] == 510_000.0
+
+
+def test_listing_keys_are_unique_after_cleaning():
+    rows = pd.concat([raw_rows(), raw_rows(CloseDate=["2024-04-01", "2024-04-02"])], ignore_index=True)
+    assert cl.clean(rows)[cl.ID_COL].is_unique
+
+
 def test_fix_fields():
     rows = raw_rows(
         BedroomsTotal=[0.0, 25.0],
@@ -81,3 +92,21 @@ def test_fix_fields():
 def test_mostly_empty_feature_is_rejected():
     with pytest.raises(ValueError, match="GarageSpaces"):
         cl.clean(raw_rows(GarageSpaces=[np.nan, np.nan]))
+
+
+def test_team_value_rules():
+    rows = raw_rows(LivingArea=[200.0, 1800.0], YearBuilt=[2030.0, 1800.0], LotSizeSquareFeet=[50.0, 7000.0],
+                    LotSizeAcres=[np.nan, 0.16], ParkingTotal=[25.0, 31.0], Longitude=[-118.0, -110.0],
+                    City=["  A ", "   "])
+    out = cl.fix_fields(cl.parse_dates(rows))
+    assert out["LivingArea"].isna().tolist() == [True, False]
+    assert out["PropertyAge"].isna().all()  # YearBuilt out of range
+    assert np.isnan(out["LotSizeSquareFeet"].iloc[0])
+    assert out["ParkingTotal"].isna().tolist() == [False, True]
+    assert out["Latitude"].isna().tolist() == [False, True]  # the whole pair is missing
+    assert out["City"].iloc[0] == "A" and pd.isna(out["City"].iloc[1])
+
+
+def test_negative_property_age_is_missing():
+    out = cl.fix_fields(cl.parse_dates(raw_rows(YearBuilt=[2025.0, 2000.0])))
+    assert out["PropertyAge"].isna().tolist() == [True, False]

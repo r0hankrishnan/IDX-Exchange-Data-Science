@@ -130,7 +130,7 @@ def test_find_comparables_matches_the_feature():
     comps = ft.find_comparables(df, df.loc[[4]], k=2)
     assert comps.index.tolist() == [0, 1]  # nearest first
     features = ft.comparable_features(comps, df.loc[4, "LivingArea"])
-    for col in ft.COMP_COLS:
+    for col in ft.COMP_COLS + ft.COMP_PRICE_COLS:
         assert np.isclose(features[col], home[col])
     assert ft.find_comparables(df, df.loc[[4]], k=10).empty  # not enough earlier sales
     assert np.isnan(ft.comparable_features(comps.iloc[:0], 1000.0)["LogCompPricePerSqft"])
@@ -226,3 +226,12 @@ def test_similar_sales_ignore_missing_attributes():
     home = ft.add_similar_sales(df, k=1).iloc[3]
     assert np.isclose(home["LogSimilarPricePerSqft"], np.log(600))  # still matched on living area
     assert np.isfinite(home["SimilarMatchScore"])
+
+
+def test_ratios_match_the_team_definitions():
+    df = pd.DataFrame({"BedroomsTotal": [3.0, 0.0], "BathroomsTotalInteger": [2.0, 1.0],
+                       "LivingArea": [1500.0, 900.0], "LotSizeSquareFeet": [6000.0, np.nan]})
+    out = ft.add_ratios(df)
+    assert out["BedBathRatio"].tolist()[0] == 1.5 and out["SqftPerBedroom"].iloc[0] == 500.0
+    assert np.isclose(out["LogLotToLivingArea"].iloc[0], np.log(4.0))
+    assert out.loc[1, ft.RATIO_COLS[1:]].isna().all()  # no bedrooms, no lot size
