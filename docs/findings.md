@@ -3,7 +3,53 @@
 This file records the result of each experiment. The newest results are at the top.
 
 Unless a section gives a different method, each value is a mean over the 6 validation months (2025-10 to
-2026-03). Each month uses a model trained on the 18 months before it. The test month (2026-04) is not scored yet.
+2026-03). Each month uses a model trained on the 18 months before it. The test month (2026-04) was scored for the
+selected model in notebook `08`.
+
+## Dataset A fix and full rerun (2026-11-22)
+
+**Problem.** The team's duplicate rule (same address and close date) did not find 233 sales that occur two times with
+the same `ListingKey` and different close dates (overlapping monthly files; 75% have the same price). An earlier copy
+of a sale could be in training and the later copy in validation: 51 of 59,411 validation sales and 6 April sales had
+this problem.
+
+**Fix.** Dataset A now follows the team's unified cleaning (`docs/team/unified_preprocessing.py`, `clean_source`):
+
+- One row for each `ListingKey` (the latest close date), before the address rule. Dataset A: 308,786 rows (309,019
+  before).
+- The team's value rules: living area 300 to 15,000 sq ft, year built 1850 to 2027, lot size 100 sq ft to 100 acres,
+  parking up to 30, California bounds for the coordinate pair, negative property age to missing, trimmed text.
+- Missing flags for all median-imputed columns and the coordinates (before: yes/no fields only).
+- Our extra removals stay: rows without a valid address, duplicate sales by address and close date, and living area
+  of 0 or less. All feature values now match `clean_source` for the shared rows.
+
+**Rerun.** All 34 candidates of `07` were fit again. One candidate is new: the team's room ratios (section 7).
+
+| Candidate | MdAPE | R² | MAE | Within 10% | Training MdAPE |
+|---|---|---|---|---|---|
+| Ensemble: top 3 (C, C + ratios, plain + similar comps) | 6.88% | 0.9176 | $131.5K | 64.4% | n/a |
+| **C: districts + HOA + flooring + comps + comp median price** | **7.02%** | 0.9144 | $133.8K | 63.6% | 5.7% |
+| C + room ratios | 7.07% | 0.9145 | $134.1K | 63.4% | 5.7% |
+| B: plain + similar comps | 7.11% | 0.9142 | $135.1K | 63.2% | 5.7% |
+| A: similar comps only | 7.15% | 0.9109 | $136.4K | 63.2% | 5.8% |
+| Served model: districts + HOA + flooring + comps | 7.21% | 0.9133 | $136.0K | 62.8% | 5.9% |
+| Reference: random forest, districts + comps, dollar price | 7.85% | 0.8994 | $149.7K | 59.3% | n/a |
+
+All rows except the reference are XGBoost (06 settings) on log price.
+
+- **C against the served model:** 0.19 points lower, in 6 of 6 months. B passes (5 of 6). **A no longer passes**
+  (4 of 6; it passed in 6 of 6 before the fix).
+- **Room ratios do not help:** C + ratios is lower than C in only 1 of 6 months.
+- **Top-3 ensemble:** 6.88%, lower than C in all 6 months. C + ratios is a member because the member rule is fixed.
+- **School districts and MLS district:** still a tie (7.21% and 7.20%, 3 of 6 months).
+- **Test month, rescored** with the same served model and the fixed data: MdAPE 7.32% (first score 7.40%), R² 0.9129
+  (0.9152), 62.1% within 10%. Range coverage 78.2% / 89.2% / 94.7%. The model and settings did not change, so the
+  rescore is not a second selection.
+- **Notebooks `03` to `06` and `experiments/05b` to `05e`** used the Dataset A before the fix. Their results are not
+  run again. Less than 1% of the values changed.
+
+The sections below that are dated 2026-11-21 use the data before the fix. Their conclusions hold, except where this
+section gives a different result.
 
 ## Similar comparable sales (notebook `07`, section 6, 2026-11-21)
 
